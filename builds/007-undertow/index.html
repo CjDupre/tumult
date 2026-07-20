@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>undertow — a liquid that never rests</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #hint {
+    position: fixed; bottom: 12px; left: 14px;
+    font: 12px/1.4 ui-monospace, monospace; color: rgba(255,255,255,.45);
+    user-select: none; pointer-events: none;
+    transition: opacity 2s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">262,144 particles of incompressible liquid &middot; the tank rolls like a ship's hold &middot; flick the pointer to throw water</div>
+
+<!-- ============================================================
+     FLIP/PIC LIQUID. Not advection *pretending* to be a fluid
+     (001) — an actual pressure-projected incompressible solve:
+
+       particles → grid   (P2G: splat velocity, additive points)
+       + gravity, mouse   (the tank itself is slowly rolling)
+       ∇·v  →  Jacobi p   (free surface: air pressure = 0)
+       v ← v − ∇p         (now divergence-free)
+       grid → particles   (FLIP delta keeps the spray lively)
+============================================================ -->
+
+<!-- P2G: each particle is a 3×3 point; the fragment shader gives
+     each covered cell its bilinear share of the particle velocity -->
+<script type="x-shader/vertex" id="p2g-vs">#version 300 es
+precision highp float;
+uniform sampler2D uPart;
+uniform vec2 uGrid;
+out vec2 vP, vV;
+void main() {
+  vec4 s = texelFetch(uPart, ivec2(gl_VertexID % 512, gl_VertexID / 512), 0);
+  vP = s.xy; vV = s.zw;
+  gl_Position = vec4(s.xy / uGrid * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = 3.0;
+}
+</script>
+<script type="x-shader/fragment" id="p2g-fs">#version 300 es
+precision highp float;
+in vec2 vP, vV;
+out vec4 outC;
+void main() {
+  vec2 d = abs(gl_FragCoord.xy - vP);            // cell center ↔ particle
+  float w = max(0.0, 1.0 - d.x) * max(0.0, 1.0 - d.y);
+  outC = vec4(vV * w, 0.0, w);
+}
+</script>
+
+<!-- normalize the splats, add gravity (rotating!) and the mouse -->
+<script type="x-shader/fragment" id="force-fs">#version 300 es
+precision highp float;
+uniform sampler2D uP2G;
+uniform vec2 uGrid;
+uniform float uTime;
+uniform vec2 uMouse, uMVel;
+out vec4 outC;   // xy = v*, z = fluid marker, w = weight (for anti-clump)
+
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec2 p = gl_FragCoord.xy;
+  bool solid = q.x < 1 || q.y < 1 || q.x > int(uGrid.x) - 2 || q.y > int(uGrid.y) - 2;
+  vec4 s = texelFetch(uP2G, q, 0);
+  float fluid = s.w > 1.0 ? 1.0 : 0.0;   // a lone stray particle is spray, not liquid
+  vec2 v = fluid > 0.5 ? s.xy / s.w : vec2(0.0);
+
+  // the sea: gravity direction leans on two incommensurate periods,
+  // so the tank never finds a rest frame
+  float tilt = 0.35 * sin(uTime * 0.11) + 0.15 * sin(uTime * 0.043);
+  v += vec2(sin(tilt), -cos(tilt)) * 0.055;
+
+  // the pointer is a paddle
+  vec2 md = p - uMouse;
+  v += uMVel * exp(-dot(md, md) / 42.0) * 0.45;
+
+  if (solid) { v = vec2(0.0); fluid = 0.0; }
+  outC = vec4(v, fluid, s.w);
+}
+</script>
+
+<!-- divergence of v* (walls hold still, so their velocity is 0),
+     plus a density-correction source: pressure projection alone only
+     *preserves* volume drift — under-dense cells must ask the solve
+     for net inflow, or FLIP noise slowly inflates the liquid -->
+<script type="x-shader/fragment" id="div-fs">#version 300 es
+precision highp float;
+uniform sampler2D uV;
+uniform float uRest;
+out vec4 outC;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec2 vl = texelFetch(uV, q + ivec2(-1, 0), 0).xy;
+  vec2 vr = texelFetch(uV, q + ivec2( 1, 0), 0).xy;
+  vec2 vb = texelFetch(uV, q + ivec2(0, -1), 0).xy;
+  vec2 vt = texelFetch(uV, q + ivec2(0,  1), 0).xy;
+  vec4 c0 = texelFetch(uV, q, 0);
+  // only deep cells get corrected — surface cells are under-dense by
+  // definition (half-covered), and correcting them boils the tank
+  float interior = c0.z
+                 * texelFetch(uV, q + ivec2(-1, 0), 0).z * texelFetch(uV, q + ivec2(1, 0), 0).z
+                 * texelFetch(uV, q + ivec2(0, -1), 0).z * texelFetch(uV, q + ivec2(0, 1), 0).z;
+  float corr = interior * clamp(0.06 * (uRest - c0.w) / uRest, -0.06, 0.06);
+  outC = vec4(0.5 * (vr.x - vl.x + vt.y - vb.y) + corr, 0.0, 0.0, 0.0);
+}
+</script>
+
+<!-- one Jacobi sweep: solid neighbor mirrors the center (∂p/∂n = 0),
+     air neighbor clamps to 0 (free surface) -->
+<script type="x-shader/fragment" id="jacobi-fs">#version 300 es
+precision highp float;
+uniform sampler2D uP, uDiv, uV;
+uniform vec2 uGrid;
+out vec4 outC;
+
+float pAt(ivec2 q, float pc) {
+  bool solid = q.x < 1 || q.y < 1 || q.x > int(uGrid.x) - 2 || q.y > int(uGrid.y) - 2;
+  if (solid) return pc;
+  if (texelFetch(uV, q, 0).z < 0.5) return 0.0;   // air
+  return texelFetch(uP, q, 0).x;
+}
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  if (texelFetch(uV, q, 0).z < 0.5) { outC = vec4(0.0); return; }
+  float pc = texelFetch(uP, q, 0).x;
+  float s = pAt(q + ivec2(-1, 0), pc) + pAt(q + ivec2(1, 0), pc)
+          + pAt(q + ivec2(0, -1), pc) + pAt(q + ivec2(0, 1), pc);
+  outC = vec4((s - texelFetch(uDiv, q, 0).x) * 0.25, 0.0, 0.0, 0.0);
+}
+</script>
+
+<!-- subtract ∇p → divergence-free grid velocity -->
+<script type="x-shader/fragment" id="proj-fs">#version 300 es
+precision highp float;
+uniform sampler2D uP, uV;
+uniform vec2 uGrid;
+out vec4 outC;
+
+float pAt(ivec2 q, float pc) {
+  bool solid = q.x < 1 || q.y < 1 || q.x > int(uGrid.x) - 2 || q.y > int(uGrid.y) - 2;
+  if (solid) return pc;
+  if (texelFetch(uV, q, 0).z < 0.5) return 0.0;
+  return texelFetch(uP, q, 0).x;
+}
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec4 s = texelFetch(uV, q, 0);
+  float pc = texelFetch(uP, q, 0).x;
+  vec2 grad = 0.5 * vec2(pAt(q + ivec2(1, 0), pc) - pAt(q + ivec2(-1, 0), pc),
+                         pAt(q + ivec2(0, 1), pc) - pAt(q + ivec2(0, -1), pc));
+  vec2 v = s.xy - grad;
+  if (s.z < 0.5) v = s.xy;          // air keeps whatever it had (nothing)
+  bool solid = q.x < 1 || q.y < 1 || q.x > int(uGrid.x) - 2 || q.y > int(uGrid.y) - 2;
+  if (solid) v = vec2(0.0);
+  outC = vec4(v, s.z, s.w);
+}
+</script>
+
+<!-- G2P + advect: FLIP delta plus a whisper of PIC for calm -->
+<script type="x-shader/fragment" id="g2p-fs">#version 300 es
+precision highp float;
+uniform sampler2D uPart, uVNew, uVStar;
+uniform vec2 uGrid;
+uniform float uReset;
+uniform float uTime;
+out vec4 outC;
+
+const float FLIP  = 0.90;
+const float SEP   = 0.03;   // push from crowded cells toward empty ones
+const float VMAX  = 3.0;    // cells per tick — keeps waves inside walls
+
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+
+vec4 bilerp(sampler2D t, vec2 p) {
+  vec2 g = p - 0.5;
+  vec2 f = fract(g);
+  ivec2 i = ivec2(floor(g));
+  return mix(mix(texelFetch(t, i, 0),               texelFetch(t, i + ivec2(1, 0), 0), f.x),
+             mix(texelFetch(t, i + ivec2(0, 1), 0), texelFetch(t, i + ivec2(1, 1), 0), f.x), f.y);
+}
+
+void main() {
+  vec2 id = gl_FragCoord.xy;
+  if (uReset > 0.5) {
+    // a calm block of liquid filling the bottom of the tank
+    vec2 r = vec2(hash1(id * 0.013), hash1(id * 0.017 + 4.2));
+    outC = vec4(1.5 + r.x * (uGrid.x - 3.0), 1.5 + r.y * (uGrid.y * 0.42), 0.0, 0.0);
+    return;
+  }
+
+  vec4 s = texelFetch(uPart, ivec2(id), 0);
+  vec2 p = s.xy, v = s.zw;
+
+  vec4 vNew  = bilerp(uVNew,  p);
+  vec4 vStar = bilerp(uVStar, p);
+
+  // in the liquid: FLIP delta + a whisper of PIC. In the air the grid
+  // knows nothing — spray flies ballistic under the same tilted gravity
+  float tilt = 0.35 * sin(uTime * 0.11) + 0.15 * sin(uTime * 0.043);
+  vec2 vFlip = FLIP * (v + vNew.xy - vStar.xy) + (1.0 - FLIP) * vNew.xy;
+  vec2 vBall = v + vec2(sin(tilt), -cos(tilt)) * 0.055;
+  v = mix(vBall, vFlip, clamp(vNew.z * 2.0, 0.0, 1.0));
+
+  // anti-clump: FLIP particles drift together over time; nudge them
+  // down the local crowding gradient (weight field came free with P2G).
+  // RELATIVE gradient — the absolute one acts like a gas and boils the
+  // liquid into foam that fills the tank
+  vec2 gw = vec2(bilerp(uVNew, p + vec2(1, 0)).w - bilerp(uVNew, p - vec2(1, 0)).w,
+                 bilerp(uVNew, p + vec2(0, 1)).w - bilerp(uVNew, p - vec2(0, 1)).w);
+  v -= gw / max(vNew.w, 2.0) * SEP;
+
+  float sp = length(v);
+  if (sp > VMAX) v *= VMAX / sp;
+  p += v;
+
+  // walls: clamp and kill the normal component
+  if (p.x < 1.05)            { p.x = 1.05;            v.x = max(v.x, 0.0); }
+  if (p.x > uGrid.x - 1.05)  { p.x = uGrid.x - 1.05;  v.x = min(v.x, 0.0); }
+  if (p.y < 1.05)            { p.y = 1.05;            v.y = max(v.y, 0.0); }
+  if (p.y > uGrid.y - 1.05)  { p.y = uGrid.y - 1.05;  v.y = min(v.y, 0.0); }
+
+  outC = vec4(p, v);
+}
+</script>
+
+<!-- ============================================================
+     RENDER — splat density and speed-weighted density at half res,
+     blur, then shade: Beer-Lambert body, gradient normals for a
+     specular glint, hot foam where the liquid is losing its mind.
+============================================================ -->
+<script type="x-shader/vertex" id="splat-vs">#version 300 es
+precision highp float;
+uniform sampler2D uPart;
+uniform vec2 uGrid;
+uniform float uPtSize;
+out float vSpeed;
+void main() {
+  vec4 s = texelFetch(uPart, ivec2(gl_VertexID % 512, gl_VertexID / 512), 0);
+  gl_Position = vec4(s.xy / uGrid * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = uPtSize;
+  vSpeed = length(s.zw);
+}
+</script>
+<script type="x-shader/fragment" id="splat-fs">#version 300 es
+precision highp float;
+in float vSpeed;
+out vec4 outC;
+void main() {
+  vec2 d = gl_PointCoord - 0.5;
+  float k = smoothstep(0.5, 0.05, length(d));
+  outC = vec4(k, k * vSpeed, 0.0, 0.0);
+}
+</script>
+
+<script type="x-shader/fragment" id="blur-fs">#version 300 es
+precision highp float;
+uniform sampler2D uImg;
+uniform vec2 uRes, uDir;
+out vec4 outC;
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec2 e = uDir / uRes;
+  outC = texture(uImg, uv) * 0.38
+       + (texture(uImg, uv + e * 1.7) + texture(uImg, uv - e * 1.7)) * 0.24
+       + (texture(uImg, uv + e * 3.9) + texture(uImg, uv - e * 3.9)) * 0.07;
+}
+</script>
+
+<script type="x-shader/fragment" id="shade-fs">#version 300 es
+precision highp float;
+uniform sampler2D uImg;
+uniform vec2 uRes;
+out vec4 outC;
+
+const float TH = 0.62;    // where liquid begins
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec4 f = texture(uImg, uv);
+  float D = f.x;
+  float speed = f.y / max(D, 1e-3);
+
+  // gradient → surface normal
+  vec2 e = vec2(1.5) / uRes;
+  float dx = texture(uImg, uv + vec2(e.x, 0.0)).x - texture(uImg, uv - vec2(e.x, 0.0)).x;
+  float dy = texture(uImg, uv + vec2(0.0, e.y)).x - texture(uImg, uv - vec2(0.0, e.y)).x;
+  // normals only mean anything near the surface; deep in the body the
+  // density noise would just shade as speckle
+  float band = 1.0 - smoothstep(1.5, 3.5, D);
+  vec3 n = normalize(vec3(-dx * 6.0 * band, -dy * 6.0 * band, 1.0));
+
+  float body = smoothstep(TH - 0.10, TH + 0.10, D);
+  float thick = smoothstep(TH, 7.0, D);
+
+  // deep water darkens; agitated water burns
+  vec3 c = mix(vec3(0.05, 0.55, 0.65), vec3(0.0, 0.045, 0.11), thick);
+  float hot = smoothstep(0.35, 1.6, speed);
+  c = mix(c, vec3(0.55, 0.95, 1.15), hot * 0.8);
+
+  vec3 L = normalize(vec3(-0.35, 0.55, 0.75));
+  float diff = max(dot(n, L), 0.0);
+  float spec = pow(max(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0), 48.0);
+  c = c * (0.55 + 0.5 * diff) + vec3(1.0) * spec * 0.7;
+
+  // meniscus light along the surface
+  float rim = smoothstep(0.14, 0.0, abs(D - TH)) * 0.5;
+  c += vec3(0.5, 0.9, 1.1) * rim;
+
+  // stray droplets glint even before they read as "liquid"
+  float spray = smoothstep(0.06, 0.4, D) * (1.0 - body);
+  vec3 col = c * body + vec3(0.35, 0.75, 0.95) * spray * (0.25 + hot);
+
+  // the tank: near-black, a breath of depth
+  vec3 bg = mix(vec3(0.010, 0.014, 0.020), vec3(0.0), uv.y);
+  col = col * max(body, spray) + bg * (1.0 - max(body, spray));
+
+  col = 1.0 - exp(-col * 1.9);
+  float v = length(uv - 0.5);
+  col *= 1.0 - 0.35 * v * v;
+  outC = vec4(pow(col, vec3(0.4545)), 1.0);
+}
+</script>
+
+<script type="x-shader/vertex" id="quad-vs">#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script>
+const N_SIDE = 512;                      // 512² = 262,144 particles
+const GRID_W = 256;
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false });
+const canFloat = gl && gl.getExtension('EXT_color_buffer_float');
+if (!gl || !canFloat) { document.body.innerHTML = '<p style="color:#fff;font-family:monospace;padding:2em">needs WebGL2 + float render targets</p>'; throw new Error('no webgl2/float'); }
+const canBlend32 = !!gl.getExtension('EXT_float_blend');   // 32-bit splats if we may
+
+const GRID_H = Math.max(96, Math.min(256, Math.round(GRID_W * innerHeight / Math.max(innerWidth, 1))));
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src.trim());
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vsId, fsId) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, document.getElementById(vsId).textContent));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, document.getElementById(fsId).textContent));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const p2gProg    = program('p2g-vs', 'p2g-fs');
+const forceProg  = program('quad-vs', 'force-fs');
+const divProg    = program('quad-vs', 'div-fs');
+const jacobiProg = program('quad-vs', 'jacobi-fs');
+const projProg   = program('quad-vs', 'proj-fs');
+const g2pProg    = program('quad-vs', 'g2p-fs');
+const splatProg  = program('splat-vs', 'splat-fs');
+const blurProg   = program('quad-vs', 'blur-fs');
+const shadeProg  = program('quad-vs', 'shade-fs');
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const emptyVao = gl.createVertexArray();
+
+function makeTex(w, h, fmt, filter) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+function fboFor(tex) {
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  return fbo;
+}
+const T = (w, h, fmt, filter) => { const tex = makeTex(w, h, fmt, filter); return { tex, fbo: fboFor(tex) }; };
+
+// particles: pos.xy + vel.xy in one RGBA32F texel
+const part = [T(N_SIDE, N_SIDE, gl.RGBA32F, gl.NEAREST), T(N_SIDE, N_SIDE, gl.RGBA32F, gl.NEAREST)];
+let pRead = 0, needReset = true;
+
+// grid buffers
+const p2g   = T(GRID_W, GRID_H, canBlend32 ? gl.RGBA32F : gl.RGBA16F, gl.NEAREST);
+const vStar = T(GRID_W, GRID_H, gl.RGBA32F, gl.NEAREST);
+const vNew  = T(GRID_W, GRID_H, gl.RGBA32F, gl.NEAREST);
+const divT  = T(GRID_W, GRID_H, gl.R32F, gl.NEAREST);
+const press = [T(GRID_W, GRID_H, gl.R32F, gl.NEAREST), T(GRID_W, GRID_H, gl.R32F, gl.NEAREST)];
+const JACOBI = 50;
+const REST = N_SIDE * N_SIDE / ((GRID_W - 3) * GRID_H * 0.42);   // particles per cell at rest
+
+let W = 0, H = 0, SW = 0, SH = 0, splat = null;
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 1.5);
+  W = Math.floor(innerWidth * dpr);
+  H = Math.floor(innerHeight * dpr);
+  canvas.width = W; canvas.height = H;
+  SW = Math.max(2, W >> 1); SH = Math.max(2, H >> 1);
+  splat = [T(SW, SH, gl.RGBA16F, gl.LINEAR), T(SW, SH, gl.RGBA16F, gl.LINEAR)];
+}
+addEventListener('resize', resize);
+resize();
+
+// pointer → grid coords; velocity measured per frame
+const mouse = { x: -99, y: -99, px: -99, py: -99, on: 0 };
+function point(cx, cy) {
+  mouse.x = cx / innerWidth * GRID_W;
+  mouse.y = (1 - cy / innerHeight) * GRID_H;
+  mouse.on = 1;
+}
+addEventListener('pointermove', e => point(e.clientX, e.clientY));
+addEventListener('pointerleave', () => { mouse.on = 0; });
+addEventListener('touchmove', e => { point(e.touches[0].clientX, e.touches[0].clientY); e.preventDefault(); }, { passive: false });
+addEventListener('touchend', () => { mouse.on = 0; });
+
+const U = {};
+for (const [name, prog, keys] of [
+  ['p2g',    p2gProg,    ['uPart', 'uGrid']],
+  ['force',  forceProg,  ['uP2G', 'uGrid', 'uTime', 'uMouse', 'uMVel']],
+  ['div',    divProg,    ['uV', 'uRest']],
+  ['jacobi', jacobiProg, ['uP', 'uDiv', 'uV', 'uGrid']],
+  ['proj',   projProg,   ['uP', 'uV', 'uGrid']],
+  ['g2p',    g2pProg,    ['uPart', 'uVNew', 'uVStar', 'uGrid', 'uReset', 'uTime']],
+  ['splat',  splatProg,  ['uPart', 'uGrid', 'uPtSize']],
+  ['blur',   blurProg,   ['uImg', 'uRes', 'uDir']],
+  ['shade',  shadeProg,  ['uImg', 'uRes']],
+]) U[name] = keys.reduce((o, k) => (o[k] = gl.getUniformLocation(prog, k), o), {});
+
+let simT = 0;
+const DT = 1 / 60;
+
+function bindTex(unit, tex) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); }
+
+function step() {
+  simT += DT;
+
+  // no pointer events fire during warp; measure flick velocity here
+  const mvx = mouse.on ? Math.max(-4, Math.min(4, mouse.x - mouse.px)) : 0;
+  const mvy = mouse.on ? Math.max(-4, Math.min(4, mouse.y - mouse.py)) : 0;
+  mouse.px = mouse.x; mouse.py = mouse.y;
+
+  gl.viewport(0, 0, GRID_W, GRID_H);
+
+  // 1. P2G — splat velocity & weight
+  gl.bindFramebuffer(gl.FRAMEBUFFER, p2g.fbo);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(p2gProg);
+  gl.bindVertexArray(emptyVao);
+  bindTex(0, part[pRead].tex);
+  gl.uniform1i(U.p2g.uPart, 0);
+  gl.uniform2f(U.p2g.uGrid, GRID_W, GRID_H);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.drawArrays(gl.POINTS, 0, N_SIDE * N_SIDE);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(vao);
+
+  // 2. normalize + forces → v*
+  gl.bindFramebuffer(gl.FRAMEBUFFER, vStar.fbo);
+  gl.useProgram(forceProg);
+  bindTex(0, p2g.tex);
+  gl.uniform1i(U.force.uP2G, 0);
+  gl.uniform2f(U.force.uGrid, GRID_W, GRID_H);
+  gl.uniform1f(U.force.uTime, simT);
+  gl.uniform2f(U.force.uMouse, mouse.x, mouse.y);
+  gl.uniform2f(U.force.uMVel, mvx, mvy);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // 3. divergence
+  gl.bindFramebuffer(gl.FRAMEBUFFER, divT.fbo);
+  gl.useProgram(divProg);
+  bindTex(0, vStar.tex);
+  gl.uniform1i(U.div.uV, 0);
+  gl.uniform1f(U.div.uRest, REST);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // 4. Jacobi relaxation (pressure warm-starts from last frame)
+  gl.useProgram(jacobiProg);
+  gl.uniform1i(U.jacobi.uP, 0);
+  gl.uniform1i(U.jacobi.uDiv, 1);
+  gl.uniform1i(U.jacobi.uV, 2);
+  gl.uniform2f(U.jacobi.uGrid, GRID_W, GRID_H);
+  bindTex(1, divT.tex);
+  bindTex(2, vStar.tex);
+  let pp = 0;
+  for (let i = 0; i < JACOBI; i++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, press[1 - pp].fbo);
+    bindTex(0, press[pp].tex);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    pp = 1 - pp;
+  }
+
+  // 5. project → divergence-free grid velocity
+  gl.bindFramebuffer(gl.FRAMEBUFFER, vNew.fbo);
+  gl.useProgram(projProg);
+  bindTex(0, press[pp].tex);
+  bindTex(1, vStar.tex);
+  gl.uniform1i(U.proj.uP, 0);
+  gl.uniform1i(U.proj.uV, 1);
+  gl.uniform2f(U.proj.uGrid, GRID_W, GRID_H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // 6. G2P + advect
+  gl.bindFramebuffer(gl.FRAMEBUFFER, part[1 - pRead].fbo);
+  gl.viewport(0, 0, N_SIDE, N_SIDE);
+  gl.useProgram(g2pProg);
+  bindTex(0, part[pRead].tex);
+  bindTex(1, vNew.tex);
+  bindTex(2, vStar.tex);
+  gl.uniform1i(U.g2p.uPart, 0);
+  gl.uniform1i(U.g2p.uVNew, 1);
+  gl.uniform1i(U.g2p.uVStar, 2);
+  gl.uniform2f(U.g2p.uGrid, GRID_W, GRID_H);
+  gl.uniform1f(U.g2p.uReset, needReset ? 1 : 0);
+  gl.uniform1f(U.g2p.uTime, simT);
+  needReset = false;
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  pRead = 1 - pRead;
+}
+
+function render() {
+  // splat density at half res
+  gl.bindFramebuffer(gl.FRAMEBUFFER, splat[0].fbo);
+  gl.viewport(0, 0, SW, SH);
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.useProgram(splatProg);
+  gl.bindVertexArray(emptyVao);
+  bindTex(0, part[pRead].tex);
+  gl.uniform1i(U.splat.uPart, 0);
+  gl.uniform2f(U.splat.uGrid, GRID_W, GRID_H);
+  gl.uniform1f(U.splat.uPtSize, Math.max(3, SW / GRID_W * 3.4));
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.drawArrays(gl.POINTS, 0, N_SIDE * N_SIDE);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(vao);
+
+  // blur x, blur y
+  gl.useProgram(blurProg);
+  gl.uniform1i(U.blur.uImg, 0);
+  gl.uniform2f(U.blur.uRes, SW, SH);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, splat[1].fbo);
+  bindTex(0, splat[0].tex);
+  gl.uniform2f(U.blur.uDir, 1, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, splat[0].fbo);
+  bindTex(0, splat[1].tex);
+  gl.uniform2f(U.blur.uDir, 0, 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // shade to screen
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(shadeProg);
+  bindTex(0, splat[0].tex);
+  gl.uniform1i(U.shade.uImg, 0);
+  gl.uniform2f(U.shade.uRes, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ?warp=N pre-runs N frames before first paint — headless capture
+// can't fast-forward requestAnimationFrame, so the piece does it itself
+const warp = Math.min(20000, parseInt(new URLSearchParams(location.search).get('warp'), 10) || 0);
+for (let i = 0; i < warp; i++) step();
+
+function frame() {
+  step();
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+if (window.self !== window.top) document.getElementById('hint').remove();
+else setTimeout(() => { document.getElementById('hint').style.opacity = 0; }, 12000);
+</script>
+</body>
+</html>

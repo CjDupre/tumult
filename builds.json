@@ -74,7 +74,21 @@
     "title": "hyphae",
     "date": "2026-07-20",
     "lineage": "005-nebula",
-    "techniques": ["physarum", "3d agents", "pheromone volume", "volumetric raymarch"],
-    "blurb": "Two rival slime molds — a million agents — negotiate one glass ball. Each follows its own scent and flees the other's; the territories are their own doing. Drag to orbit."
+    "techniques": [
+      "physarum",
+      "3d agents",
+      "pheromone volume",
+      "volumetric raymarch"
+    ],
+    "blurb": "Two rival slime molds \u2014 a million agents \u2014 negotiate one glass ball. Each follows its own scent and flees the other's; the territories are their own doing. Drag to orbit."
+  },
+  {
+    "id": "007",
+    "slug": "007-undertow",
+    "title": "undertow",
+    "date": "2026-07-20",
+    "lineage": "006-hyphae",
+    "techniques": ["flip fluid", "pressure solve", "free surface", "gpu particles"],
+    "blurb": "An actual incompressible liquid — 262,144 particles, pressure-projected — in a tank that rolls like a ship's hold. Flick the pointer to throw water."
   }
 ]
