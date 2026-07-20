@@ -1,0 +1,11 @@
+[
+  {
+    "id": "001",
+    "slug": "001-ink-flow",
+    "title": "ink flow",
+    "date": "2026-07-19",
+    "lineage": "origin",
+    "techniques": ["feedback loop", "curl noise", "advection", "cosine palette"],
+    "blurb": "Ink advected through a curl-noise field, accumulated in a buffer that is never cleared. Mouse stirs."
+  }
+]

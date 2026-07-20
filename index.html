@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tumult</title>
+<meta name="description" content="real-time generative graphics that never sit still">
+<style>
+  :root {
+    --bg: #07070a;
+    --panel: #0e0e14;
+    --line: #1e1e2a;
+    --ink: #e8e8f0;
+    --dim: #8a8a9c;
+    --faint: #55556a;
+    --acc: #9ff2c8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 15px/1.6 ui-monospace, "SF Mono", Menlo, monospace; }
+  a { color: inherit; }
+
+  /* masthead — the newest build, live, IS the header background */
+  header {
+    position: relative; height: 46vh; min-height: 320px;
+    display: flex; align-items: flex-end; overflow: hidden;
+    border-bottom: 1px solid var(--line);
+  }
+  header iframe {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    border: 0; pointer-events: none; opacity: .55;
+  }
+  header .veil {
+    position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(7,7,10,.25), rgba(7,7,10,.92));
+  }
+  header .masthead {
+    position: relative; padding: 32px clamp(20px, 5vw, 64px);
+  }
+  h1 {
+    margin: 0; font-size: clamp(40px, 8vw, 88px); font-weight: 400;
+    letter-spacing: .28em; text-transform: lowercase;
+  }
+  .tagline { color: var(--dim); margin: 6px 0 0 4px; }
+  .tagline b { color: var(--acc); font-weight: 400; }
+
+  main { padding: 40px clamp(20px, 5vw, 64px) 80px; }
+  .meta-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    color: var(--faint); margin-bottom: 24px; flex-wrap: wrap; gap: 8px;
+  }
+  .meta-row a { color: var(--dim); text-decoration: none; border-bottom: 1px solid var(--line); }
+  .meta-row a:hover { color: var(--acc); border-color: var(--acc); }
+
+  .grid {
+    display: grid; gap: 24px;
+    grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr));
+  }
+  .card {
+    display: block; text-decoration: none;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; transition: transform .18s ease, border-color .18s ease;
+  }
+  .card:hover { transform: translateY(-3px); border-color: var(--acc); }
+  .frame {
+    position: relative; aspect-ratio: 16 / 10; background: #000; overflow: hidden;
+  }
+  .frame iframe {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    border: 0; pointer-events: none;
+  }
+  .live {
+    position: absolute; top: 10px; right: 10px;
+    font-size: 10px; letter-spacing: .18em; color: var(--acc);
+    background: rgba(7,7,10,.7); border: 1px solid rgba(159,242,200,.35);
+    padding: 3px 8px; border-radius: 99px;
+  }
+  .live::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--acc); margin-right: 6px; vertical-align: 1px;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .card-body { padding: 14px 16px 16px; }
+  .card-title { display: flex; justify-content: space-between; align-items: baseline; }
+  .card-title .name { font-size: 17px; }
+  .card-title .id { color: var(--faint); }
+  .blurb { color: var(--dim); font-size: 13px; margin: 6px 0 10px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    font-size: 11px; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 99px; padding: 2px 9px;
+  }
+  .empty { color: var(--faint); padding: 60px 0; text-align: center; }
+  footer {
+    color: var(--faint); padding: 0 clamp(20px, 5vw, 64px) 48px; font-size: 13px;
+  }
+  footer code { color: var(--dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <div id="mast-frame"></div>
+  <div class="veil"></div>
+  <div class="masthead">
+    <h1>tumult</h1>
+    <p class="tagline">real-time generative graphics that never sit still ·
+      <b>every frame is the last frame, disturbed</b></p>
+  </div>
+</header>
+
+<main>
+  <div class="meta-row">
+    <span id="count"></span>
+    <span>previews are live simulations, not video</span>
+  </div>
+  <div class="grid" id="grid"></div>
+  <p class="empty" id="empty" hidden>
+    could not load <code>builds.json</code> — if you opened this from
+    <code>file://</code>, serve it instead: <code>python3 -m http.server</code>
+  </p>
+</main>
+
+<footer>
+  each build is one self-contained html file. clone, open, edit a constant,
+  refresh. scaffold the next one with <code>tools/new-build.sh</code>.
+</footer>
+
+<script>
+(async () => {
+  let builds;
+  try {
+    builds = await (await fetch('builds.json', { cache: 'no-store' })).json();
+  } catch {
+    document.getElementById('empty').hidden = false;
+    return;
+  }
+  builds.sort((a, b) => b.id.localeCompare(a.id)); // newest first
+
+  // newest build runs live behind the masthead
+  const mast = document.createElement('iframe');
+  mast.src = `builds/${builds[0].slug}/index.html`;
+  mast.loading = 'lazy';
+  mast.tabIndex = -1;
+  document.getElementById('mast-frame').replaceWith(mast);
+
+  document.getElementById('count').textContent =
+    `${builds.length} build${builds.length === 1 ? '' : 's'} · newest first`;
+
+  const grid = document.getElementById('grid');
+  for (const b of builds) {
+    const a = document.createElement('a');
+    a.className = 'card';
+    a.href = `builds/${b.slug}/index.html`;
+    a.innerHTML = `
+      <div class="frame" data-src="builds/${b.slug}/index.html">
+        <span class="live">live</span>
+      </div>
+      <div class="card-body">
+        <div class="card-title"><span class="name">${b.title}</span><span class="id">#${b.id}</span></div>
+        <p class="blurb">${b.blurb}</p>
+        <div class="tags">${b.techniques.map(t => `<span class="tag">${t}</span>`).join('')}
+          <span class="tag">${b.date}</span></div>
+      </div>`;
+    grid.appendChild(a);
+  }
+
+  // mount each preview's iframe only while it's near the viewport
+  const io = new IntersectionObserver(entries => {
+    for (const e of entries) {
+      const holder = e.target;
+      const mounted = holder.querySelector('iframe');
+      if (e.isIntersecting && !mounted) {
+        const f = document.createElement('iframe');
+        f.src = holder.dataset.src;
+        f.tabIndex = -1;
+        holder.prepend(f);
+      } else if (!e.isIntersecting && mounted) {
+        mounted.remove(); // free the GPU when scrolled away
+      }
+    }
+  }, { rootMargin: '300px' });
+  document.querySelectorAll('.frame').forEach(el => io.observe(el));
+})();
+</script>
+</body>
+</html>
