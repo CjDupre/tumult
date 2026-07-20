@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cathedral — ray-marched mandelbox</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #hint {
+    position: fixed; bottom: 12px; left: 14px;
+    font: 12px/1.4 ui-monospace, monospace; color: rgba(255,255,255,.45);
+    user-select: none; pointer-events: none;
+    transition: opacity 2s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">drag to orbit &middot; nothing here is modeled &mdash; the whole structure is one distance equation, and it is breathing</div>
+
+<!-- ============================================================
+     One pass, no feedback. Every pixel shoots a ray into a signed
+     distance field (a mandelbox: fold space, invert space, scale,
+     repeat ×10) and walks it until it hits. The fold scale slowly
+     oscillates, so the architecture perpetually dissolves and
+     re-crystallizes. Color comes from an orbit trap — how close
+     each point's iterations passed to the origin.
+============================================================ -->
+<script type="x-shader/fragment" id="fs">#version 300 es
+precision highp float;
+
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec2  uLook;     // yaw/pitch offset from mouse drag
+
+out vec4 outColor;
+
+// ---- tweak these ------------------------------------------------
+const float BREATH_DEPTH = 0.34;   // how far the fold scale swings
+const float BREATH_RATE  = 0.055;  // breaths per second-ish
+const float ORBIT_RATE   = 0.045;  // camera revolution speed
+const int   FOLDS        = 10;     // fractal iterations
+const int   STEPS        = 120;    // ray march budget
+// -----------------------------------------------------------------
+
+float gScale;
+
+// mandelbox distance estimator, with orbit trap
+float map(vec3 p, out float trap) {
+  vec3 z = p;
+  float dr = 1.0;
+  trap = 1e9;
+  for (int i = 0; i < FOLDS; i++) {
+    z = clamp(z, -1.0, 1.0) * 2.0 - z;          // box fold: reflect at the walls
+    float r2 = dot(z, z);
+    trap = min(trap, r2);
+    if (r2 < 0.25)      { z *= 4.0;       dr *= 4.0; }        // sphere fold: inflate the small
+    else if (r2 < 1.0)  { z /= r2;        dr /= r2;  }        // invert the medium
+    z = z * gScale + p;                                       // scale and re-seed
+    dr = dr * abs(gScale) + 1.0;
+    if (r2 > 1000.0) break;
+  }
+  return length(z) / abs(dr);
+}
+
+vec3 normalAt(vec3 p) {
+  float t;
+  vec2 e = vec2(0.0007, -0.0007);
+  return normalize(e.xyy * map(p + e.xyy, t) + e.yyx * map(p + e.yyx, t) +
+                   e.yxy * map(p + e.yxy, t) + e.xxx * map(p + e.xxx, t));
+}
+
+vec3 palette(float t) {
+  return 0.5 + 0.5 * cos(6.28318 * (vec3(0.95, 1.0, 1.05) * t + vec3(0.15, 0.35, 0.55)));
+}
+
+void main() {
+  gScale = 2.6 + BREATH_DEPTH * sin(uTime * BREATH_RATE * 6.28318);
+
+  vec2 uv = (gl_FragCoord.xy * 2.0 - uRes) / uRes.y;
+
+  // orbiting camera, always looking at the heart of the structure
+  float yaw   = uTime * ORBIT_RATE * 6.28318 + uLook.x;
+  float pitch = 0.32 * sin(uTime * 0.021 * 6.28318) + uLook.y;
+  pitch = clamp(pitch, -1.2, 1.2);
+  float R = 9.2;
+  vec3 ro = R * vec3(cos(pitch) * cos(yaw), sin(pitch), cos(pitch) * sin(yaw));
+  vec3 fw = normalize(-ro);
+  vec3 rt = normalize(cross(fw, vec3(0, 1, 0)));
+  vec3 up = cross(rt, fw);
+  vec3 rd = normalize(fw * 1.6 + rt * uv.x + up * uv.y);
+
+  // march
+  float t = 0.0, trap = 1e9, glow = 0.0;
+  int steps = 0;
+  bool hit = false;
+  for (int i = 0; i < STEPS; i++) {
+    float tr;
+    float d = map(ro + rd * t, tr);
+    glow += exp(-d * 14.0);                 // near-misses accumulate as haze
+    if (d < 0.0008 * max(t, 0.6)) { trap = tr; hit = true; break; }
+    t += d * 0.85;
+    steps = i;
+    if (t > 26.0) break;
+  }
+
+  vec3 bgTop = vec3(0.020, 0.024, 0.038);
+  vec3 bgBot = vec3(0.004, 0.004, 0.008);
+  vec3 col = mix(bgBot, bgTop, 0.5 + 0.5 * rd.y);
+
+  if (hit) {
+    vec3 p = ro + rd * t;
+    vec3 n = normalAt(p);
+    vec3 sun = normalize(vec3(0.55, 0.7, -0.3));
+
+    float ao = 1.0 - float(steps) / float(STEPS);   // step count as free ambient occlusion
+    ao = ao * ao;
+    float diff = max(dot(n, sun), 0.0);
+    float sky  = 0.5 + 0.5 * n.y;
+    float spec = pow(max(dot(reflect(rd, n), sun), 0.0), 24.0);
+    float fres = pow(1.0 + dot(rd, n), 3.0);
+
+    vec3 albedo = palette(sqrt(trap) * 1.4 + uTime * 0.004) * 0.75 + 0.1;
+    col = albedo * (diff * vec3(1.0, 0.93, 0.82) * 1.1 + sky * vec3(0.20, 0.26, 0.38)) * ao
+        + vec3(1.0, 0.95, 0.85) * spec * ao * 0.7
+        + albedo * fres * 0.25;
+
+    col = mix(col, mix(bgBot, bgTop, 0.5), 1.0 - exp(-0.0035 * t * t));  // depth fog
+  }
+
+  col += palette(uTime * 0.004 + 0.6) * glow * 0.0014;   // the haze of near-misses
+
+  float v = length(gl_FragCoord.xy / uRes - 0.5);
+  col *= 1.0 - 0.35 * v * v;
+  col = pow(1.0 - exp(-col * 1.7), vec3(0.4545));
+
+  outColor = vec4(col, 1.0);
+}
+</script>
+
+<script type="x-shader/vertex" id="vs">#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script>
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false });
+if (!gl) { document.body.innerHTML = '<p style="color:#fff;font-family:monospace;padding:2em">WebGL2 not available</p>'; throw new Error('no webgl2'); }
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src.trim());
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, document.getElementById('vs').textContent));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+const U = ['uRes', 'uTime', 'uLook'].reduce((o, k) => (o[k] = gl.getUniformLocation(prog, k), o), {});
+
+// ray marching is per-pixel expensive — render at a gentler density
+let W = 0, H = 0;
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 1.25);
+  W = Math.floor(innerWidth * dpr);
+  H = Math.floor(innerHeight * dpr);
+  canvas.width = W; canvas.height = H;
+}
+addEventListener('resize', resize);
+resize();
+
+// drag to orbit, with soft easing
+const look = { x: 0, y: 0, tx: 0, ty: 0, dragging: false, px: 0, py: 0 };
+canvas.addEventListener('pointerdown', e => { look.dragging = true; look.px = e.clientX; look.py = e.clientY; });
+addEventListener('pointerup', () => { look.dragging = false; });
+addEventListener('pointermove', e => {
+  if (!look.dragging) return;
+  look.tx += (e.clientX - look.px) * 0.005;
+  look.ty += (e.clientY - look.py) * 0.005;
+  look.ty = Math.max(-1.1, Math.min(1.1, look.ty));
+  look.px = e.clientX; look.py = e.clientY;
+});
+
+const t0 = performance.now();
+function frame() {
+  look.x += (look.tx - look.x) * 0.06;
+  look.y += (look.ty - look.y) * 0.06;
+
+  gl.viewport(0, 0, W, H);
+  gl.uniform2f(U.uRes, W, H);
+  gl.uniform1f(U.uTime, (performance.now() - t0) / 1000);
+  gl.uniform2f(U.uLook, look.x, look.y);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+if (window.self !== window.top) document.getElementById('hint').remove();
+else setTimeout(() => { document.getElementById('hint').style.opacity = 0; }, 12000);
+</script>
+</body>
+</html>
