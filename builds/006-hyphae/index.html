@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hyphae — two slime molds share a volume</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  #hint {
+    position: fixed; bottom: 12px; left: 14px;
+    font: 12px/1.4 ui-monospace, monospace; color: rgba(255,255,255,.45);
+    user-select: none; pointer-events: none;
+    transition: opacity 2s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">1,048,576 agents of two rival slime molds &middot; each smells its own kind and flees the other &middot; drag to orbit, wheel to approach</div>
+
+<!-- ============================================================
+     AGENT UPDATE — classic Jones physarum, lifted into 3-D.
+     One texel per agent, MRT: target 0 = position (w = species),
+     target 1 = heading. Each agent sniffs the pheromone volume at
+     five points ahead (forward + four tilted around its own local
+     frame), scores them as own-smell minus rival-smell, turns
+     toward the winner, and walks. That's the whole organism.
+============================================================ -->
+<script type="x-shader/fragment" id="agent-fs">#version 300 es
+precision highp float;
+
+uniform sampler2D uPos;
+uniform sampler2D uDir;
+uniform sampler2D uVol;
+uniform float uTime;
+uniform float uReset;
+
+layout(location = 0) out vec4 outPos;
+layout(location = 1) out vec4 outDir;
+
+// ---- tweak these ------------------------------------------------
+const float SPEED   = 0.0028;  // ~0.36 voxel per tick
+const float SENSE_D = 0.045;   // sniffing distance (~9 voxels)
+const float SENSE_A = 0.55;    // sensor tilt off the heading (rad)
+const float TURN    = 0.42;    // how sharply an agent commits
+const float JITTER  = 0.09;    // wanderlust
+const float REPEL   = 1.6;     // rival trail counts this much against
+const float HOME_R  = 0.44;    // soft containment radius
+// -----------------------------------------------------------------
+
+float hash1(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+
+// pheromone volume: 192³ voxels tiled into a 3072×2304 texture,
+// 16×12 slices — z picks the tile, xy picks the texel inside it
+vec2 vol(vec3 p) {
+  ivec3 v = ivec3(clamp(p, 0.0, 0.999) * 192.0);
+  return texelFetch(uVol, ivec2((v.z % 16) * 192 + v.x,
+                                (v.z / 16) * 192 + v.y), 0).rg;
+}
+float sense(vec3 p, float sp) {
+  vec2 rg = vol(p);
+  return mix(rg.r, rg.g, sp) - REPEL * mix(rg.g, rg.r, sp);
+}
+
+void main() {
+  vec2 id = gl_FragCoord.xy;
+  float sp = step(512.0, id.y);   // bottom half species 0, top half 1
+
+  if (uReset > 0.5) {
+    // both species born intermixed in one small cloud — the
+    // segregation you see later is entirely their own doing
+    float u   = hash1(vec3(id, 1.0)) * 2.0 - 1.0;
+    float ph  = hash1(vec3(id, 2.0)) * 6.28318;
+    float rad = pow(hash1(vec3(id, 3.0)), 0.3333) * 0.30;
+    vec3 dir  = vec3(sqrt(1.0 - u * u) * cos(ph), sqrt(1.0 - u * u) * sin(ph), u);
+    outPos = vec4(vec3(0.5) + dir * rad, sp);
+    float u2  = hash1(vec3(id, 4.0)) * 2.0 - 1.0;
+    float ph2 = hash1(vec3(id, 5.0)) * 6.28318;
+    outDir = vec4(sqrt(1.0 - u2 * u2) * cos(ph2), sqrt(1.0 - u2 * u2) * sin(ph2), u2, 0.0);
+    return;
+  }
+
+  ivec2 ij = ivec2(id);
+  vec4 P = texelFetch(uPos, ij, 0);
+  vec3 p = P.xyz;
+  vec3 d = normalize(texelFetch(uDir, ij, 0).xyz);
+  sp = P.w;
+
+  // local frame around the heading
+  vec3 arb = abs(d.y) < 0.9 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+  vec3 u = normalize(cross(d, arb));
+  vec3 v = cross(d, u);
+  float ca = cos(SENSE_A), sa = sin(SENSE_A);
+
+  vec3 d1 = ca * d + sa * u, d2 = ca * d - sa * u;
+  vec3 d3 = ca * d + sa * v, d4 = ca * d - sa * v;
+  float bv = sense(p + d * SENSE_D, sp) + 5e-4;   // slight straight-ahead bias
+  vec3 best = d;
+  float s1 = sense(p + d1 * SENSE_D, sp); if (s1 > bv) { bv = s1; best = d1; }
+  float s2 = sense(p + d2 * SENSE_D, sp); if (s2 > bv) { bv = s2; best = d2; }
+  float s3 = sense(p + d3 * SENSE_D, sp); if (s3 > bv) { bv = s3; best = d3; }
+  float s4 = sense(p + d4 * SENSE_D, sp); if (s4 > bv) { bv = s4; best = d4; }
+  d = normalize(mix(d, best, TURN));
+
+  // wanderlust, so highways stay alive instead of freezing
+  d = normalize(d + (vec3(hash1(vec3(id, uTime)),
+                          hash1(vec3(id * 1.7, uTime + 9.1)),
+                          hash1(vec3(id * 2.3, uTime + 17.4))) - 0.5) * JITTER);
+
+  // soft containment: past HOME_R the heading bends back inward
+  vec3 c = p - 0.5;
+  float r = length(c);
+  if (r > HOME_R) d = normalize(d - c / r * (r - HOME_R) * 12.0);
+
+  p = clamp(p + d * SPEED, 0.01, 0.99);
+
+  outPos = vec4(p, sp);
+  outDir = vec4(d, 0.0);
+}
+</script>
+
+<!-- ============================================================
+     DEPOSIT — every agent stamps one voxel of pheromone per tick,
+     species 0 into R, species 1 into G. Attribute-less points
+     again: gl_VertexID → agent texel → voxel → tile pixel.
+============================================================ -->
+<script type="x-shader/vertex" id="dep-vs">#version 300 es
+precision highp float;
+uniform sampler2D uPos;
+flat out float vSpec;
+void main() {
+  vec4 P = texelFetch(uPos, ivec2(gl_VertexID % 1024, gl_VertexID / 1024), 0);
+  ivec3 v = ivec3(clamp(P.xyz, 0.0, 0.999) * 192.0);
+  vec2 px = vec2(float((v.z % 16) * 192 + v.x), float((v.z / 16) * 192 + v.y)) + 0.5;
+  gl_Position = vec4(px / vec2(3072.0, 2304.0) * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = 1.0;
+  vSpec = P.w;
+}
+</script>
+<script type="x-shader/fragment" id="dep-fs">#version 300 es
+precision highp float;
+flat in float vSpec;
+out vec4 outColor;
+const float DEPOSIT = 0.10;
+void main() { outColor = vec4((1.0 - vSpec) * DEPOSIT, vSpec * DEPOSIT, 0.0, 0.0); }
+</script>
+
+<!-- ============================================================
+     DIFFUSE + DECAY — a 3-D box blur as three separable passes.
+     X and Y stay inside a slice; Z hops between tiles. The last
+     pass multiplies in the decay that makes trails mortal.
+============================================================ -->
+<script type="x-shader/fragment" id="blurx-fs">#version 300 es
+precision highp float;
+uniform sampler2D uVol;
+out vec4 outColor;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  int tx = (q.x / 192) * 192;             // tile origin in x
+  int lx = q.x % 192;
+  vec2 c = texelFetch(uVol, q, 0).rg * 0.70
+         + texelFetch(uVol, ivec2(tx + max(lx - 1, 0),   q.y), 0).rg * 0.15
+         + texelFetch(uVol, ivec2(tx + min(lx + 1, 191), q.y), 0).rg * 0.15;
+  outColor = vec4(c, 0.0, 0.0);
+}
+</script>
+<script type="x-shader/fragment" id="blury-fs">#version 300 es
+precision highp float;
+uniform sampler2D uVol;
+out vec4 outColor;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  int ty = (q.y / 192) * 192;
+  int ly = q.y % 192;
+  vec2 c = texelFetch(uVol, q, 0).rg * 0.70
+         + texelFetch(uVol, ivec2(q.x, ty + max(ly - 1, 0)),   0).rg * 0.15
+         + texelFetch(uVol, ivec2(q.x, ty + min(ly + 1, 191)), 0).rg * 0.15;
+  outColor = vec4(c, 0.0, 0.0);
+}
+</script>
+<script type="x-shader/fragment" id="blurz-fs">#version 300 es
+precision highp float;
+uniform sampler2D uVol;
+out vec4 outColor;
+const float DECAY = 0.90;
+ivec2 tex(int z, int lx, int ly) { return ivec2((z % 16) * 192 + lx, (z / 16) * 192 + ly); }
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  int lx = q.x % 192, ly = q.y % 192;
+  int z = (q.y / 192) * 16 + (q.x / 192);
+  vec2 c = texelFetch(uVol, q, 0).rg * 0.70
+         + texelFetch(uVol, tex(max(z - 1, 0),   lx, ly), 0).rg * 0.15
+         + texelFetch(uVol, tex(min(z + 1, 191), lx, ly), 0).rg * 0.15;
+  outColor = vec4(c * DECAY, 0.0, 0.0);
+}
+</script>
+
+<!-- ============================================================
+     RENDER — raymarch the pheromone like glowing smoke. Trilinear
+     sampling by hand (two slices, hardware bilinear inside each),
+     emission from a per-species palette, and a 3-tap march toward
+     the light for self-shadowing, so the network has a lit side.
+============================================================ -->
+<script type="x-shader/fragment" id="march-fs">#version 300 es
+precision highp float;
+uniform sampler2D uVol;
+uniform vec2  uRes;
+uniform vec3  uEye, uFwd, uRight, uUp;
+uniform float uTanF, uAspect, uTime;
+out vec4 outColor;
+
+const int   STEPS  = 96;
+const float GAIN   = 0.060;  // density → emission compression
+const float ABSORB = 0.035;  // opacity of the medium — low: light passes through
+const float SHADOW = 0.015;  // how hard the network shades itself
+const vec3  LDIR   = vec3(0.424, 0.741, 0.318);   // normalized
+
+float hash1(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+
+vec2 sampleVol(vec3 q) {   // q in [0,1]³, manual trilinear across tiles
+  float zf = clamp(q.z * 192.0 - 0.5, 0.0, 190.999);
+  float z0 = floor(zf), fz = zf - z0;
+  vec2 luv = clamp(q.xy, 0.0, 1.0) * 191.0 + 0.5;
+  vec2 s0 = (vec2(mod(z0, 16.0),       floor(z0 / 16.0))         * 192.0 + luv) / vec2(3072.0, 2304.0);
+  vec2 s1 = (vec2(mod(z0 + 1.0, 16.0), floor((z0 + 1.0) / 16.0)) * 192.0 + luv) / vec2(3072.0, 2304.0);
+  return mix(texture(uVol, s0).rg, texture(uVol, s1).rg, fz);
+}
+
+vec2 sphereHit(vec3 ro, vec3 rd, float rad) {
+  float b = dot(ro, rd);
+  float h = b * b - dot(ro, ro) + rad * rad;
+  if (h < 0.0) return vec2(-1.0);
+  h = sqrt(h);
+  return vec2(-b - h, -b + h);
+}
+
+void main() {
+  vec2 ndc = gl_FragCoord.xy / uRes * 2.0 - 1.0;
+  vec3 rd = normalize(uFwd + uRight * ndc.x * uTanF * uAspect + uUp * ndc.y * uTanF);
+
+  vec2 hit = sphereHit(uEye, rd, 0.95);
+  vec3 col = vec3(0.0);
+  if (hit.y > 0.0) {
+    float t0 = max(hit.x, 0.0);
+    float dt = (hit.y - t0) / float(STEPS);
+    float t = t0 + dt * hash1(vec3(gl_FragCoord.xy, uTime));   // dither the banding away
+
+    float T = 1.0;
+    for (int i = 0; i < STEPS; i++) {
+      vec3 pw = uEye + rd * t;
+      vec2 dns = sampleVol(pw * 0.5 + 0.5);
+      float total = dns.r + dns.g;
+      if (total > 0.05) {
+        // self-shadow: three sniffs toward the light
+        vec3 q = pw * 0.5 + 0.5;
+        vec3 l = LDIR * 0.5;   // volume-space light step
+        vec2 o1 = sampleVol(q + l * 0.05), o2 = sampleVol(q + l * 0.11), o3 = sampleVol(q + l * 0.20);
+        float occ = o1.r + o1.g + o2.r + o2.g + o3.r + o3.g;
+        float lit = 0.45 + 0.55 * exp(-occ * SHADOW);
+
+        float xr = 1.0 - exp(-dns.r * GAIN);
+        float xg = 1.0 - exp(-dns.g * GAIN);
+        vec3 emis = (vec3(0.05, 0.55, 1.60) + vec3(1.1, 1.3, 1.2) * xr * xr) * xr
+                  + (vec3(1.60, 0.35, 0.06) + vec3(1.3, 1.2, 1.0) * xg * xg) * xg;
+        col += T * emis * lit * dt * 18.0;
+        T *= exp(-min(total, 60.0) * ABSORB * dt * 60.0);
+        if (T < 0.01) break;
+      }
+      t += dt;
+    }
+  }
+  outColor = vec4(col, 1.0);
+}
+</script>
+
+<!-- present: tone-map, gamma, vignette -->
+<script type="x-shader/fragment" id="show-fs">#version 300 es
+precision highp float;
+uniform sampler2D uImg;
+uniform vec2 uRes;
+out vec4 outColor;
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 c = texture(uImg, uv).rgb;
+  c = 1.0 - exp(-c * 1.6);
+  float v = length(uv - 0.5);
+  c *= 1.0 - 0.4 * v * v;
+  outColor = vec4(pow(c, vec3(0.4545)), 1.0);
+}
+</script>
+
+<script type="x-shader/vertex" id="quad-vs">#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script>
+const N_SIDE = 1024;                 // 1024² = 1,048,576 agents
+const VOL_W = 3072, VOL_H = 2304;    // 192³ voxels as 16×12 tiles
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false });
+const canFloat = gl && gl.getExtension('EXT_color_buffer_float');
+if (!gl || !canFloat) { document.body.innerHTML = '<p style="color:#fff;font-family:monospace;padding:2em">needs WebGL2 + float render targets</p>'; throw new Error('no webgl2/float'); }
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src.trim());
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vsId, fsId) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, document.getElementById(vsId).textContent));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, document.getElementById(fsId).textContent));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const agentProg = program('quad-vs', 'agent-fs');
+const depProg   = program('dep-vs', 'dep-fs');
+const blurXProg = program('quad-vs', 'blurx-fs');
+const blurYProg = program('quad-vs', 'blury-fs');
+const blurZProg = program('quad-vs', 'blurz-fs');
+const marchProg = program('quad-vs', 'march-fs');
+const showProg  = program('quad-vs', 'show-fs');
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const emptyVao = gl.createVertexArray();
+
+function makeTex(w, h, fmt, filter) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+function fboFor(...texes) {
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  texes.forEach((t, i) => gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, t, 0));
+  if (texes.length > 1) gl.drawBuffers(texes.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
+  gl.clearColor(0, 0, 0, 0);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  return fbo;
+}
+
+// agent state ×2 (pos + dir, MRT) — positions stay 32-bit (004's lesson)
+function makeAgents() {
+  const pos = makeTex(N_SIDE, N_SIDE, gl.RGBA32F, gl.NEAREST);
+  const dir = makeTex(N_SIDE, N_SIDE, gl.RGBA32F, gl.NEAREST);
+  return { pos, dir, fbo: fboFor(pos, dir) };
+}
+const agents = [makeAgents(), makeAgents()];
+let aRead = 0, needReset = true;
+
+// pheromone volume ×2 — RG16F, LINEAR for the raymarcher's trilinear
+const volTex = [makeTex(VOL_W, VOL_H, gl.RG16F, gl.LINEAR), makeTex(VOL_W, VOL_H, gl.RG16F, gl.LINEAR)];
+const volFbo = [fboFor(volTex[0]), fboFor(volTex[1])];
+let vCur = 0;
+
+let W = 0, H = 0, RW = 0, RH = 0, hdrTex = null, hdrFbo = null;
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 1.5);
+  W = Math.floor(innerWidth * dpr);
+  H = Math.floor(innerHeight * dpr);
+  canvas.width = W; canvas.height = H;
+  RW = Math.max(2, Math.floor(W * 0.75));   // raymarch at 3/4 res — volumetrics forgive it
+  RH = Math.max(2, Math.floor(H * 0.75));
+  hdrTex = makeTex(RW, RH, gl.RGBA16F, gl.LINEAR);
+  hdrFbo = fboFor(hdrTex);
+}
+addEventListener('resize', resize);
+resize();
+
+// ---- camera: slow self-orbit, drag steers, wheel approaches ----
+const cam = { yaw: 0, pitch: 0, dist: 0, vyaw: 0, vpitch: 0 };
+let dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener('pointerdown', e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  cam.vyaw = 0; cam.vpitch = 0;
+  canvas.classList.add('dragging'); canvas.setPointerCapture(e.pointerId);
+});
+addEventListener('pointermove', e => {
+  if (!dragging) return;
+  cam.vyaw   = (e.clientX - lastX) * 0.005;
+  cam.vpitch = (e.clientY - lastY) * 0.005;
+  cam.yaw += cam.vyaw; cam.pitch += cam.vpitch;
+  lastX = e.clientX; lastY = e.clientY;
+});
+addEventListener('pointerup', () => { dragging = false; canvas.classList.remove('dragging'); });
+addEventListener('wheel', e => { cam.dist = Math.max(-1.1, Math.min(1.8, cam.dist + e.deltaY * 0.002)); }, { passive: true });
+
+function camera(t) {
+  if (!dragging) { cam.yaw += cam.vyaw; cam.pitch += cam.vpitch; cam.vyaw *= 0.95; cam.vpitch *= 0.95; }
+  const yaw   = t * 0.05 + cam.yaw;
+  const pitch = Math.max(-1.3, Math.min(1.3, 0.30 + 0.14 * Math.sin(t * 0.037) + cam.pitch));
+  const dist  = 2.55 + 0.2 * Math.sin(t * 0.019) + cam.dist;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const eye = [dist * cp * Math.sin(yaw), dist * sp, dist * cp * Math.cos(yaw)];
+  const fl = Math.hypot(...eye);
+  const fwd = eye.map(e => -e / fl);
+  let rx = -fwd[2], rz = fwd[0];
+  const rl = Math.hypot(rx, rz); rx /= rl; rz /= rl;      // cross(fwd, up) normalized
+  const up = [-rz * fwd[1], rz * fwd[0] - rx * fwd[2], rx * fwd[1]];   // cross(right, fwd)
+  return { eye, fwd, right: [rx, 0, rz], up };
+}
+
+const U = {};
+for (const [name, prog, keys] of [
+  ['agent', agentProg, ['uPos', 'uDir', 'uVol', 'uTime', 'uReset']],
+  ['dep',   depProg,   ['uPos']],
+  ['blurx', blurXProg, ['uVol']],
+  ['blury', blurYProg, ['uVol']],
+  ['blurz', blurZProg, ['uVol']],
+  ['march', marchProg, ['uVol', 'uRes', 'uEye', 'uFwd', 'uRight', 'uUp', 'uTanF', 'uAspect', 'uTime']],
+  ['show',  showProg,  ['uImg', 'uRes']],
+]) U[name] = keys.reduce((o, k) => (o[k] = gl.getUniformLocation(prog, k), o), {});
+
+let simT = 0;
+const DT = 1 / 60;   // one physarum tick per frame, always the same size
+
+function step() {
+  simT += DT;
+
+  // 1. every agent sniffs, turns, walks
+  gl.bindVertexArray(vao);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, agents[1 - aRead].fbo);
+  gl.viewport(0, 0, N_SIDE, N_SIDE);
+  gl.useProgram(agentProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, agents[aRead].pos);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, agents[aRead].dir);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, volTex[vCur]);
+  gl.uniform1i(U.agent.uPos, 0); gl.uniform1i(U.agent.uDir, 1); gl.uniform1i(U.agent.uVol, 2);
+  gl.uniform1f(U.agent.uTime, simT);
+  gl.uniform1f(U.agent.uReset, needReset ? 1 : 0);
+  needReset = false;
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  aRead = 1 - aRead;
+
+  // 2. every agent stamps its voxel
+  gl.bindFramebuffer(gl.FRAMEBUFFER, volFbo[vCur]);
+  gl.viewport(0, 0, VOL_W, VOL_H);
+  gl.useProgram(depProg);
+  gl.bindVertexArray(emptyVao);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, agents[aRead].pos);
+  gl.uniform1i(U.dep.uPos, 0);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.drawArrays(gl.POINTS, 0, N_SIDE * N_SIDE);
+  gl.disable(gl.BLEND);
+
+  // 3. diffuse (three separable passes) + decay
+  gl.bindVertexArray(vao);
+  const pass = (prog, u, src, dst) => {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, volFbo[dst]);
+    gl.useProgram(prog);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, volTex[src]);
+    gl.uniform1i(u.uVol, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  };
+  pass(blurXProg, U.blurx, vCur, 1 - vCur);
+  pass(blurYProg, U.blury, 1 - vCur, vCur);
+  pass(blurZProg, U.blurz, vCur, 1 - vCur);
+  vCur = 1 - vCur;
+}
+
+function render() {
+  const c = camera(simT);
+
+  // 4. raymarch the volume into the HDR buffer
+  gl.bindVertexArray(vao);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, hdrFbo);
+  gl.viewport(0, 0, RW, RH);
+  gl.useProgram(marchProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, volTex[vCur]);
+  gl.uniform1i(U.march.uVol, 0);
+  gl.uniform2f(U.march.uRes, RW, RH);
+  gl.uniform3fv(U.march.uEye, c.eye);
+  gl.uniform3fv(U.march.uFwd, c.fwd);
+  gl.uniform3fv(U.march.uRight, c.right);
+  gl.uniform3fv(U.march.uUp, c.up);
+  gl.uniform1f(U.march.uTanF, Math.tan(0.436));
+  gl.uniform1f(U.march.uAspect, RW / RH);
+  gl.uniform1f(U.march.uTime, simT);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // 5. tone-map up to the screen
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(showProg);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, hdrTex);
+  gl.uniform1i(U.show.uImg, 0);
+  gl.uniform2f(U.show.uRes, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ?warp=N pre-runs N sim ticks before first paint — headless capture
+// can't fast-forward requestAnimationFrame, so the piece does it itself
+const warp = Math.min(20000, parseInt(new URLSearchParams(location.search).get('warp'), 10) || 0);
+for (let i = 0; i < warp; i++) step();
+
+function frame() {
+  step();
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+if (window.self !== window.top) document.getElementById('hint').remove();
+else setTimeout(() => { document.getElementById('hint').style.opacity = 0; }, 12000);
+</script>
+</body>
+</html>

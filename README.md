@@ -24,6 +24,7 @@ it has never been.
 
 | # | piece | techniques | live | notes |
 |---|-------|------------|------|-------|
+| 006 | **hyphae** | 3d physarum · two species · volumetric raymarch | [run](https://cjdupre.github.io/tumult/builds/006-hyphae/) | [notes](builds/006-hyphae/NOTES.md) |
 | 005 | **nebula** | 3d gpu particles · iso-surface filaments · orbiting camera | [run](https://cjdupre.github.io/tumult/builds/005-nebula/) | [notes](builds/005-nebula/NOTES.md) |
 | 004 | **ember field** | gpu particles · flow field · additive trails | [run](https://cjdupre.github.io/tumult/builds/004-ember-field/) | [notes](builds/004-ember-field/NOTES.md) |
 | 003 | **cathedral** | ray marching · mandelbox · orbit trap | [run](https://cjdupre.github.io/tumult/builds/003-cathedral/) | [notes](builds/003-cathedral/NOTES.md) |
