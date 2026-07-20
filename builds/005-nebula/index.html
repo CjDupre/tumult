@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nebula — a million particles learn depth</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  #hint {
+    position: fixed; bottom: 12px; left: 14px;
+    font: 12px/1.4 ui-monospace, monospace; color: rgba(255,255,255,.45);
+    user-select: none; pointer-events: none;
+    transition: opacity 2s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">1,048,576 particles in a volume &middot; drag to orbit, wheel to approach &middot; the filaments are the intersection curves of two invisible surfaces</div>
+
+<!-- ============================================================
+     STATE UPDATE — one texel per particle, two render targets:
+     target 0 = position.xyz, target 1 = velocity.xyz.
+     The field: two scalar fbm's a(p), b(p). Their iso-surfaces
+     a=0, b=0 intersect in space curves — the filaments. The same
+     two gradients give both forces: descend onto the intersection
+     (gather) and stream along cross(∇a,∇b), which is tangent to
+     both surfaces (flow). One pair of gradients, whole behavior.
+============================================================ -->
+<script type="x-shader/fragment" id="sim-fs">#version 300 es
+precision highp float;
+
+uniform sampler2D uPos;
+uniform sampler2D uVel;
+uniform float uTime;
+uniform float uReset;
+
+layout(location = 0) out vec4 outPos;
+layout(location = 1) out vec4 outVel;
+
+// ---- tweak these ------------------------------------------------
+const float FIELD_SCALE = 1.4;     // filament spacing inside the unit ball
+const float ACCEL       = 0.0016;  // how hard the field pushes
+const float DRAG        = 0.86;    // low inertia — settle onto the curves
+const float DRIFT       = 0.05;    // how fast the two surfaces deform
+const float RESPAWN     = 0.002;   // fraction reborn per frame
+const float GATHER      = 0.70;    // 0 = pure streaming, 1 = pure convergence
+// -----------------------------------------------------------------
+
+float hash1(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.zyx + 31.32);
+  return fract((p.x + p.y) * p.z);
+}
+float noise(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash1(i),                   hash1(i + vec3(1, 0, 0)), f.x),
+                 mix(hash1(i + vec3(0, 1, 0)),   hash1(i + vec3(1, 1, 0)), f.x), f.y),
+             mix(mix(hash1(i + vec3(0, 0, 1)),   hash1(i + vec3(1, 0, 1)), f.x),
+                 mix(hash1(i + vec3(0, 1, 1)),   hash1(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+float fbm(vec3 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 3; i++) {
+    v += a * noise(p);
+    p = p * 2.13 + vec3(1.7, 9.2, 4.1);
+    a *= 0.5;
+  }
+  return v - 0.44;   // subtract the mean so the iso-surface threads the whole ball
+}
+
+// tetrahedral sampling: four fbm taps give value AND gradient
+vec4 fieldGrad(vec3 p) {
+  const vec2 e = vec2(1.0, -1.0) * 0.02;
+  float f1 = fbm(p + e.xyy), f2 = fbm(p + e.yyx),
+        f3 = fbm(p + e.yxy), f4 = fbm(p + e.xxx);
+  vec3 g = (e.xyy * f1 + e.yyx * f2 + e.yxy * f3 + e.xxx * f4) / (4.0 * 0.02 * 0.02);
+  return vec4(g, (f1 + f2 + f3 + f4) * 0.25);
+}
+
+vec3 spawn(vec2 id, float t) {
+  float u   = hash1(vec3(id, t))       * 2.0 - 1.0;
+  float phi = hash1(vec3(id * 1.7, t)) * 6.28318;
+  float r   = pow(hash1(vec3(id * 2.3, t + 4.2)), 0.3333) * 0.95;
+  return vec3(sqrt(1.0 - u * u) * cos(phi), sqrt(1.0 - u * u) * sin(phi), u) * r;
+}
+
+void main() {
+  ivec2 ij = ivec2(gl_FragCoord.xy);
+  vec2 id = gl_FragCoord.xy;
+
+  if (uReset > 0.5) {
+    outPos = vec4(spawn(id, 0.0), 0.0);
+    outVel = vec4(0.0);
+    return;
+  }
+
+  vec3 p = texelFetch(uPos, ij, 0).xyz;
+  vec3 v = texelFetch(uVel, ij, 0).xyz;
+
+  // the two invisible surfaces, drifting independently
+  vec3 q = p * FIELD_SCALE;
+  vec4 A = fieldGrad(q + vec3(0.0, uTime * DRIFT, 0.0));
+  vec4 B = fieldGrad(q + vec3(uTime * DRIFT * 0.71, 0.0, 5.8));
+
+  // flow: tangent to both iso-surfaces → runs along the filament.
+  // gather: gradient descent on (a² + b²)/2 → falls onto it.
+  vec3 flow   = cross(A.xyz, B.xyz);
+  vec3 gather = -(A.w * A.xyz + B.w * B.xyz);
+  v += (flow / (length(flow) + 1e-4) * (1.0 - GATHER) + gather * 4.0 * GATHER) * ACCEL;
+
+  // soft spherical containment — the nebula has no walls, just reluctance
+  float r = length(p);
+  v -= p * smoothstep(1.0, 1.5, r) * 0.02;
+
+  v *= DRAG;
+  p += v;
+
+  if (hash1(vec3(id * 0.011, fract(uTime) * 3.7)) < RESPAWN || r > 2.0) {
+    p = spawn(id, uTime);
+    v = vec3(0.0);
+  }
+
+  outPos = vec4(p, 0.0);
+  outVel = vec4(v, 0.0);
+}
+</script>
+
+<!-- ============================================================
+     PARTICLE DRAW — still no vertex buffer: gl_VertexID reads the
+     position texture, a matrix built each frame on the CPU projects
+     it. Perspective sets point size, depth sets a fog dimming, so
+     the cloud reads as a volume even before it starts to turn.
+============================================================ -->
+<script type="x-shader/vertex" id="pt-vs">#version 300 es
+precision highp float;
+uniform sampler2D uPos;
+uniform sampler2D uVel;
+uniform mat4 uProjView;
+uniform float uPointBase;
+uniform float uTime;
+out vec3 vColor;
+
+vec3 palette(float t) {
+  return 0.5 + 0.5 * cos(6.28318 * (vec3(0.95, 1.0, 1.05) * t + vec3(0.0, 0.25, 0.55)));
+}
+
+void main() {
+  ivec2 ij = ivec2(gl_VertexID % 1024, gl_VertexID / 1024);
+  vec3 p = texelFetch(uPos, ij, 0).xyz;
+  vec3 v = texelFetch(uVel, ij, 0).xyz;
+
+  vec4 clip = uProjView * vec4(p, 1.0);
+  gl_Position = clip;
+  float w = max(clip.w, 0.15);
+  gl_PointSize = clamp(uPointBase / w, 1.0, 4.0);
+
+  // hue drifts across space (same lesson as 004: speed is brightness,
+  // never hue, or filaments turn to confetti); fog dims the far side
+  float speed = length(v);
+  float fog = exp(-(w - 1.5) * 0.5);
+  vColor = palette(dot(p, vec3(0.32, 0.18, 0.26)) + uTime * 0.01)
+         * (0.4 + speed * 130.0) * fog;
+}
+</script>
+<script type="x-shader/fragment" id="pt-fs">#version 300 es
+precision highp float;
+in vec3 vColor;
+out vec4 outColor;
+void main() {
+  float d = length(gl_PointCoord - 0.5);
+  float a = smoothstep(0.5, 0.0, d);
+  outColor = vec4(vColor * a * 0.030, 1.0);
+}
+</script>
+
+<!-- trail fade: shorter memory than 004 — the camera moves, so long
+     trails would smear the volume; short ones read as motion blur -->
+<script type="x-shader/fragment" id="fade-fs">#version 300 es
+precision highp float;
+uniform sampler2D uTrail;
+uniform vec2 uRes;
+out vec4 outColor;
+void main() {
+  vec3 c = texture(uTrail, gl_FragCoord.xy / uRes).rgb;
+  outColor = vec4(c * 0.92, 1.0);
+}
+</script>
+
+<!-- present: tone-map the accumulated light -->
+<script type="x-shader/fragment" id="show-fs">#version 300 es
+precision highp float;
+uniform sampler2D uTrail;
+uniform vec2 uRes;
+out vec4 outColor;
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 c = texture(uTrail, uv).rgb;
+  c = 1.0 - exp(-c * 3.5);
+  float v = length(uv - 0.5);
+  c *= 1.0 - 0.4 * v * v;
+  outColor = vec4(pow(c, vec3(0.4545)), 1.0);
+}
+</script>
+
+<script type="x-shader/vertex" id="quad-vs">#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script>
+const N_SIDE = 1024;                       // 1024² = 1,048,576 particles
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false });
+const canFloat = gl && gl.getExtension('EXT_color_buffer_float');
+if (!gl || !canFloat) { document.body.innerHTML = '<p style="color:#fff;font-family:monospace;padding:2em">needs WebGL2 + float render targets</p>'; throw new Error('no webgl2/float'); }
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src.trim());
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vsId, fsId) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, document.getElementById(vsId).textContent));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, document.getElementById(fsId).textContent));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const simProg  = program('quad-vs', 'sim-fs');
+const ptProg   = program('pt-vs', 'pt-fs');
+const fadeProg = program('quad-vs', 'fade-fs');
+const showProg = program('quad-vs', 'show-fs');
+
+// fullscreen triangle VAO (also used, attribute-less, for points)
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const emptyVao = gl.createVertexArray();   // points: gl_VertexID does all the work
+
+function makeTex(w, h, prec32) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  if (prec32) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+  else        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+
+// particle state: position + velocity as two 32-bit float render targets
+// on one framebuffer (MRT), ping-ponged as a pair
+function makeState() {
+  const pos = makeTex(N_SIDE, N_SIDE, true);
+  const vel = makeTex(N_SIDE, N_SIDE, true);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pos, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, vel, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+  return { pos, vel, fbo };
+}
+const state = [makeState(), makeState()];
+let sRead = 0, needReset = true;
+
+function makeTrail(w, h) {
+  const tex = makeTex(w, h, false);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  return { tex, fbo };
+}
+
+let W = 0, H = 0, trail = null, tRead = 0;
+function resize() {
+  const dpr = Math.min(devicePixelRatio || 1, 1.5);
+  W = Math.floor(innerWidth * dpr);
+  H = Math.floor(innerHeight * dpr);
+  canvas.width = W; canvas.height = H;
+  trail = [makeTrail(W, H), makeTrail(W, H)];
+}
+addEventListener('resize', resize);
+resize();
+
+// ---- camera: slow self-orbit, drag steers, wheel approaches ----
+const cam = { yaw: 0, pitch: 0, dist: 0, vyaw: 0, vpitch: 0 };
+let dragging = false, lastX = 0, lastY = 0;
+canvas.addEventListener('pointerdown', e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  cam.vyaw = 0; cam.vpitch = 0;
+  canvas.classList.add('dragging'); canvas.setPointerCapture(e.pointerId);
+});
+addEventListener('pointermove', e => {
+  if (!dragging) return;
+  cam.vyaw   = (e.clientX - lastX) * 0.005;
+  cam.vpitch = (e.clientY - lastY) * 0.005;
+  cam.yaw += cam.vyaw; cam.pitch += cam.vpitch;
+  lastX = e.clientX; lastY = e.clientY;
+});
+addEventListener('pointerup', () => { dragging = false; canvas.classList.remove('dragging'); });
+addEventListener('wheel', e => { cam.dist = Math.max(-1.0, Math.min(1.6, cam.dist + e.deltaY * 0.002)); }, { passive: true });
+
+function projView(t) {
+  // gentle glide when idle; drag inertia decays back into it
+  if (!dragging) { cam.yaw += cam.vyaw; cam.pitch += cam.vpitch; cam.vyaw *= 0.95; cam.vpitch *= 0.95; }
+  const yaw   = t * 0.06 + cam.yaw;
+  const pitch = Math.max(-1.3, Math.min(1.3, 0.28 + 0.12 * Math.sin(t * 0.043) + cam.pitch));
+  const dist  = 2.6 + 0.25 * Math.sin(t * 0.021) + cam.dist;
+
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const cy = Math.cos(yaw),   sy = Math.sin(yaw);
+  const eye = [dist * cp * sy, dist * sp, dist * cp * cy];
+
+  // look-at basis (target = origin, up = +y)
+  let zx = eye[0], zy = eye[1], zz = eye[2];
+  const zl = Math.hypot(zx, zy, zz); zx /= zl; zy /= zl; zz /= zl;
+  let xx = zz, xz = -zx;                       // cross(up, z), up = (0,1,0)
+  const xl = Math.hypot(xx, xz); xx /= xl; xz /= xl;
+  const yx = zy * xz, yy = zz * xx - zx * xz, yz = -zy * xx;   // cross(z, x)
+
+  const f = 1 / Math.tan(0.436), n = 0.1, fa = 12.0;   // fov ≈ 50°
+  const a = W / H;
+  const px = f / a, py = f;
+  const pz = (fa + n) / (n - fa), pw = (2 * fa * n) / (n - fa);
+
+  // proj * view, column-major
+  const ex = -(xx * eye[0] + xz * eye[2]);
+  const ey = -(yx * eye[0] + yy * eye[1] + yz * eye[2]);
+  const ez = -(zx * eye[0] + zy * eye[1] + zz * eye[2]);
+  return new Float32Array([
+    px * xx, py * yx, pz * zx, -zx,
+    0,       py * yy, pz * zy, -zy,
+    px * xz, py * yz, pz * zz, -zz,
+    px * ex, py * ey, pz * ez + pw, -ez,
+  ]);
+}
+
+const simU  = ['uPos', 'uVel', 'uTime', 'uReset']
+  .reduce((o, k) => (o[k] = gl.getUniformLocation(simProg, k), o), {});
+const ptU   = ['uPos', 'uVel', 'uProjView', 'uPointBase', 'uTime']
+  .reduce((o, k) => (o[k] = gl.getUniformLocation(ptProg, k), o), {});
+const fadeU = ['uTrail', 'uRes'].reduce((o, k) => (o[k] = gl.getUniformLocation(fadeProg, k), o), {});
+const showU = ['uTrail', 'uRes'].reduce((o, k) => (o[k] = gl.getUniformLocation(showProg, k), o), {});
+
+let simT = 0, lastNow = 0;
+const DT = 1 / 60;   // simulation runs on its own clock, one tick per frame
+
+function step(dt) {
+  simT += dt;
+  const t = simT;
+
+  // 1. advance particle state (pos + vel written in one MRT pass)
+  gl.bindVertexArray(vao);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, state[1 - sRead].fbo);
+  gl.viewport(0, 0, N_SIDE, N_SIDE);
+  gl.useProgram(simProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state[sRead].pos);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, state[sRead].vel);
+  gl.uniform1i(simU.uPos, 0);
+  gl.uniform1i(simU.uVel, 1);
+  gl.uniform1f(simU.uTime, t);
+  gl.uniform1f(simU.uReset, needReset ? 1 : 0);
+  needReset = false;
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  sRead = 1 - sRead;
+
+  // 2. fade last frame's glow into the other trail buffer
+  gl.bindFramebuffer(gl.FRAMEBUFFER, trail[1 - tRead].fbo);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(fadeProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, trail[tRead].tex);
+  gl.uniform1i(fadeU.uTrail, 0);
+  gl.uniform2f(fadeU.uRes, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // 3. splat all million particles on top, additively, through the camera
+  gl.useProgram(ptProg);
+  gl.bindVertexArray(emptyVao);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state[sRead].pos);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, state[sRead].vel);
+  gl.uniform1i(ptU.uPos, 0);
+  gl.uniform1i(ptU.uVel, 1);
+  gl.uniformMatrix4fv(ptU.uProjView, false, projView(t));
+  gl.uniform1f(ptU.uPointBase, Math.max(2.8, W / 480));
+  gl.uniform1f(ptU.uTime, t);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.drawArrays(gl.POINTS, 0, N_SIDE * N_SIDE);
+  gl.disable(gl.BLEND);
+  tRead = 1 - tRead;
+}
+
+function render() {
+  // 4. tone-map to screen
+  gl.bindVertexArray(vao);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(showProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, trail[tRead].tex);
+  gl.uniform1i(showU.uTrail, 0);
+  gl.uniform2f(showU.uRes, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ?warp=N pre-runs N frames before first paint — headless capture
+// can't fast-forward requestAnimationFrame, so the piece does it itself
+const warp = Math.min(20000, parseInt(new URLSearchParams(location.search).get('warp'), 10) || 0);
+for (let i = 0; i < warp; i++) step(DT);
+
+function frame(now) {
+  const dt = lastNow ? Math.min((now - lastNow) / 1000, 0.05) : DT;
+  lastNow = now;
+  step(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+if (window.self !== window.top) document.getElementById('hint').remove();
+else setTimeout(() => { document.getElementById('hint').style.opacity = 0; }, 12000);
+</script>
+</body>
+</html>

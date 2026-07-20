@@ -5,7 +5,12 @@
     "title": "ink flow",
     "date": "2026-07-19",
     "lineage": "origin",
-    "techniques": ["feedback loop", "curl noise", "advection", "cosine palette"],
+    "techniques": [
+      "feedback loop",
+      "curl noise",
+      "advection",
+      "cosine palette"
+    ],
     "blurb": "Ink advected through a curl-noise field, accumulated in a buffer that is never cleared. Mouse stirs."
   },
   {
@@ -14,7 +19,11 @@
     "title": "coral bloom",
     "date": "2026-07-19",
     "lineage": "001-ink-flow",
-    "techniques": ["reaction-diffusion", "gray-scott", "gradient lighting"],
+    "techniques": [
+      "reaction-diffusion",
+      "gray-scott",
+      "gradient lighting"
+    ],
     "blurb": "Two chemicals feeding on each other grow luminous-membraned colonies that split, merge, and wander. Draw to seed; R wipes the dish."
   },
   {
@@ -23,7 +32,12 @@
     "title": "cathedral",
     "date": "2026-07-19",
     "lineage": "origin",
-    "techniques": ["ray marching", "mandelbox", "orbit trap", "distance fields"],
+    "techniques": [
+      "ray marching",
+      "mandelbox",
+      "orbit trap",
+      "distance fields"
+    ],
     "blurb": "One distance equation, folded ten times, breathing. Nothing is modeled; the architecture rebuilds itself forever. Drag to orbit."
   },
   {
@@ -32,7 +46,21 @@
     "title": "ember field",
     "date": "2026-07-19",
     "lineage": "001-ink-flow",
-    "techniques": ["gpu particles", "flow field", "additive trails", "gl_VertexID"],
+    "techniques": [
+      "gpu particles",
+      "flow field",
+      "additive trails",
+      "gl_VertexID"
+    ],
     "blurb": "1,048,576 particles combed into silk filaments by a drifting field. No geometry is ever uploaded. The mouse is a vortex."
+  },
+  {
+    "id": "005",
+    "slug": "005-nebula",
+    "title": "nebula",
+    "date": "2026-07-20",
+    "lineage": "004-ember-field",
+    "techniques": ["gpu particles", "3d flow field", "iso-surface filaments", "orbiting camera"],
+    "blurb": "The million particles learn depth: a volume of embers gathering onto the intersection curves of two invisible drifting surfaces. Drag to orbit."
   }
 ]
