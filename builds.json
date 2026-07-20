@@ -7,5 +7,32 @@
     "lineage": "origin",
     "techniques": ["feedback loop", "curl noise", "advection", "cosine palette"],
     "blurb": "Ink advected through a curl-noise field, accumulated in a buffer that is never cleared. Mouse stirs."
+  },
+  {
+    "id": "002",
+    "slug": "002-coral-bloom",
+    "title": "coral bloom",
+    "date": "2026-07-19",
+    "lineage": "001-ink-flow",
+    "techniques": ["reaction-diffusion", "gray-scott", "gradient lighting"],
+    "blurb": "Two chemicals feeding on each other grow luminous-membraned colonies that split, merge, and wander. Draw to seed; R wipes the dish."
+  },
+  {
+    "id": "003",
+    "slug": "003-cathedral",
+    "title": "cathedral",
+    "date": "2026-07-19",
+    "lineage": "origin",
+    "techniques": ["ray marching", "mandelbox", "orbit trap", "distance fields"],
+    "blurb": "One distance equation, folded ten times, breathing. Nothing is modeled; the architecture rebuilds itself forever. Drag to orbit."
+  },
+  {
+    "id": "004",
+    "slug": "004-ember-field",
+    "title": "ember field",
+    "date": "2026-07-19",
+    "lineage": "001-ink-flow",
+    "techniques": ["gpu particles", "flow field", "additive trails", "gl_VertexID"],
+    "blurb": "1,048,576 particles combed into silk filaments by a drifting field. No geometry is ever uploaded. The mouse is a vortex."
   }
 ]

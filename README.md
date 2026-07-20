@@ -24,6 +24,9 @@ it has never been.
 
 | # | piece | techniques | live | notes |
 |---|-------|------------|------|-------|
+| 004 | **ember field** | gpu particles · flow field · additive trails | [run](https://cjdupre.github.io/tumult/builds/004-ember-field/) | [notes](builds/004-ember-field/NOTES.md) |
+| 003 | **cathedral** | ray marching · mandelbox · orbit trap | [run](https://cjdupre.github.io/tumult/builds/003-cathedral/) | [notes](builds/003-cathedral/NOTES.md) |
+| 002 | **coral bloom** | reaction-diffusion · gray-scott · gradient lighting | [run](https://cjdupre.github.io/tumult/builds/002-coral-bloom/) | [notes](builds/002-coral-bloom/NOTES.md) |
 | 001 | **ink flow** | feedback loop · curl noise · advection · cosine palette | [run](https://cjdupre.github.io/tumult/builds/001-ink-flow/) | [notes](builds/001-ink-flow/NOTES.md) |
 
 Every build is one self-contained `index.html` and one `NOTES.md` recording
@@ -54,6 +57,11 @@ outColor  = vec4(prev * DECAY + inject(p), 1.0);
 Because the buffer is never cleared, structure accumulates: history is the
 medium. The rest — noise octaves, palettes, tone curves — is seasoning.
 Each build's `NOTES.md` documents its particular seasoning.
+
+Stateful builds also accept `?warp=N`, which pre-runs N simulation frames
+before first paint — headless browsers can't fast-forward
+`requestAnimationFrame`, so each piece knows how to fast-forward itself
+(`tools/capture.sh` uses this to shoot the previews).
 
 ## running locally
 

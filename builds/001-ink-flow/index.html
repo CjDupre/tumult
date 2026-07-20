@@ -42,8 +42,8 @@ out vec4 outColor;
 const float NOISE_SCALE   = 2.2;    // bigger = tighter swirls
 const float FLOW_STRENGTH = 0.0016; // how far pixels travel per frame
 const float DRIFT         = 0.06;   // how fast the flow field itself evolves
-const float DECAY         = 0.995;  // 1.0 = ink never fades
-const float INK_AMOUNT    = 0.016;  // strength of the ambient ink source
+const float DECAY         = 0.996;  // 1.0 = ink never fades
+const float INK_AMOUNT    = 0.024;  // strength of the ambient ink source
 // -----------------------------------------------------------------
 
 // value noise + fbm ("fractal Brownian motion" — noise stacked in octaves)
@@ -243,12 +243,11 @@ const showU = {
 };
 
 let read = 0;
-const t0 = performance.now();
+let simT = 0, lastNow = 0;
+const DT = 1 / 60;   // simulation runs on its own clock, one tick per frame
 
-function frame() {
-  const t = (performance.now() - t0) / 1000;
-
-  // --- simulation pass: prev frame in, next frame out ---
+function step(dt) {
+  simT += dt;
   gl.bindFramebuffer(gl.FRAMEBUFFER, targets[1 - read].fbo);
   gl.viewport(0, 0, W, H);
   gl.useProgram(simProg);
@@ -256,14 +255,16 @@ function frame() {
   gl.bindTexture(gl.TEXTURE_2D, targets[read].tex);
   gl.uniform1i(simU.prev, 0);
   gl.uniform2f(simU.res, W, H);
-  gl.uniform1f(simU.time, t);
+  gl.uniform1f(simU.time, simT);
   gl.uniform2f(simU.mouse, mouse.x, mouse.y);
   gl.uniform2f(simU.mouseVel, mouse.vx, mouse.vy);
   gl.uniform1f(simU.mouseOn, mouse.on);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
   read = 1 - read;
+  mouse.vx *= 0.5; mouse.vy *= 0.5; // velocity fades between events
+}
 
-  // --- display pass: tone-map the sim to the screen ---
+function render() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, W, H);
   gl.useProgram(showProg);
@@ -272,9 +273,18 @@ function frame() {
   gl.uniform1i(showU.tex, 0);
   gl.uniform2f(showU.res, W, H);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
 
-  mouse.vx *= 0.5; mouse.vy *= 0.5; // velocity fades between events
+// ?warp=N pre-runs N frames before first paint — headless capture
+// can't fast-forward requestAnimationFrame, so the piece does it itself
+const warp = Math.min(20000, parseInt(new URLSearchParams(location.search).get('warp'), 10) || 0);
+for (let i = 0; i < warp; i++) step(DT);
 
+function frame(now) {
+  const dt = lastNow ? Math.min((now - lastNow) / 1000, 0.05) : DT;
+  lastNow = now;
+  step(dt);
+  render();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
