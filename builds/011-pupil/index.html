@@ -166,13 +166,17 @@ void main() {
 }
 </script>
 
-<!-- SGD: W[i,j] −= lr · (1/B) Σ_b δ[b,i]·act[b,j]   (j = last column → bias) -->
+<!-- Adam: per-weight adaptive steps. Plain SGD on a Fourier MLP
+     learns the blobs in seconds and then crawls forever; Adam is
+     what makes the details arrive. m and v ride along in a second
+     render target — optimizer state is just more state-in-texture. -->
 <script type="x-shader/fragment" id="sgd-fs">#version 300 es
 precision highp float;
-uniform sampler2D uW, uD, uA;
+uniform sampler2D uW, uMV, uD, uA;
 uniform int uInN;
-uniform float uLR, uReset, uSeed, uScale;
-out vec4 outC;
+uniform float uLR, uReset, uSeed, uScale, uT;
+layout(location = 0) out vec4 outW;
+layout(location = 1) out vec4 outMV;
 float hash1(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
   p += dot(p, p + 45.32);
@@ -181,7 +185,8 @@ float hash1(vec2 p) {
 void main() {
   int j = int(gl_FragCoord.x), i = int(gl_FragCoord.y);
   if (uReset > 0.5) {
-    outC = vec4((hash1(vec2(float(j) * 1.7 + 0.3, float(i) * 2.9 + uSeed)) - 0.5) * uScale, 0, 0, 0);
+    outW = vec4((hash1(vec2(float(j) * 1.7 + 0.3, float(i) * 2.9 + uSeed)) - 0.5) * uScale, 0, 0, 0);
+    outMV = vec4(0.0);
     return;
   }
   float g = 0.0;
@@ -189,7 +194,14 @@ void main() {
     float a = j == uInN ? 1.0 : texelFetch(uA, ivec2(b, j), 0).r;
     g += texelFetch(uD, ivec2(b, i), 0).r * a;
   }
-  outC = vec4(texelFetch(uW, ivec2(j, i), 0).r - uLR * g / 1024.0, 0, 0, 0);
+  g /= 1024.0;
+  vec2 mv = texelFetch(uMV, ivec2(j, i), 0).rg;
+  float m = mix(g,     mv.x, 0.9);
+  float v = mix(g * g, mv.y, 0.999);
+  float mh = m / (1.0 - pow(0.9,   uT));
+  float vh = v / (1.0 - pow(0.999, uT));
+  outW = vec4(texelFetch(uW, ivec2(j, i), 0).r - uLR * mh / (sqrt(vh) + 1e-8), 0, 0, 0);
+  outMV = vec4(m, v, 0.0, 0.0);
 }
 </script>
 
@@ -282,7 +294,7 @@ void main() {
 </script>
 
 <script>
-const B = 1024, NH = 48, STEPS_PER_FRAME = 6;
+const B = 1024, NH = 48, STEPS_PER_FRAME = 8;
 const canvas = document.getElementById('c');
 const gl = canvas.getContext('webgl2', { antialias: false });
 const canFloat = gl && gl.getExtension('EXT_color_buffer_float');
@@ -355,10 +367,25 @@ const H2 = makeTex(B, NH, gl.R32F);
 const D3 = makeTex(B, 3,  gl.R32F);
 const D2 = makeTex(B, NH, gl.R32F);
 const D1 = makeTex(B, NH, gl.R32F);
-// weights: 33 columns (32 in + bias), ping-pong
-const W1 = [makeTex(49, NH, gl.R32F), makeTex(49, NH, gl.R32F)];
-const W2 = [makeTex(49, NH, gl.R32F), makeTex(49, NH, gl.R32F)];
-const W3 = [makeTex(49, 3,  gl.R32F), makeTex(49, 3,  gl.R32F)];
+// weights: 49 columns (48 in + bias) + Adam moments, ping-pong
+function makeWeight(w, h) {
+  const wt = gl.createTexture(), mv = gl.createTexture();
+  for (const [t, fmt] of [[wt, gl.R32F], [mv, gl.RG32F]]) {
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, wt, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, mv, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+  return { tex: wt, mv, fbo, w, h };
+}
+const W1 = [makeWeight(49, NH), makeWeight(49, NH)];
+const W2 = [makeWeight(49, NH), makeWeight(49, NH)];
+const W3 = [makeWeight(49, 3),  makeWeight(49, 3)];
 let w1 = 0, w2 = 0, w3 = 0, needInit = true;
 
 // the eye's copy of the weights — EMA-smoothed, strobe-free
@@ -403,11 +430,11 @@ function uploadCam() {
 
 let W = 0, H = 0, RS = null;
 function resize() {
-  const dpr = Math.min(devicePixelRatio || 1, 1.5);
+  const dpr = 1;   // beliefs are soft; retina spends fans on nothing
   W = Math.floor(innerWidth * dpr);
   H = Math.floor(innerHeight * dpr);
   canvas.width = W; canvas.height = H;
-  RS = makeTex(Math.max(2, Math.floor(W * 0.55)), Math.max(2, Math.floor(H * 0.55)), gl.RGBA8);
+  RS = makeTex(Math.max(2, Math.floor(W * 0.42)), Math.max(2, Math.floor(H * 0.42)), gl.RGBA8);
   gl.bindTexture(gl.TEXTURE_2D, RS.tex);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -436,7 +463,7 @@ function pass(prog, dst, binds, setu) {
 
 let simT = 0, stepIdx = 0;
 const DT = 1 / 60;
-const LR = 0.16;
+const LR = 0.002;   // Adam units
 
 function trainStep() {
   stepIdx++;
@@ -460,12 +487,14 @@ function trainStep() {
     () => gl.uniform1i(u.back.uNextN, 48));
 
   const sgd = (Wpair, cur, Dtex, Atex, seed, scale) => {
-    pass(P.sgd, Wpair[1 - cur], [[u.sgd.uW, Wpair[cur].tex], [u.sgd.uD, Dtex], [u.sgd.uA, Atex]], () => {
+    pass(P.sgd, Wpair[1 - cur], [[u.sgd.uW, Wpair[cur].tex], [u.sgd.uMV, Wpair[cur].mv],
+                                 [u.sgd.uD, Dtex], [u.sgd.uA, Atex]], () => {
       gl.uniform1i(u.sgd.uInN, 48);
       gl.uniform1f(u.sgd.uLR, LR);
       gl.uniform1f(u.sgd.uReset, needInit ? 1 : 0);
       gl.uniform1f(u.sgd.uSeed, seed);
       gl.uniform1f(u.sgd.uScale, scale);
+      gl.uniform1f(u.sgd.uT, Math.min(stepIdx, 100000));
     });
   };
   sgd(W3, w3, D3.tex, H2.tex, 13.7, 0.6); w3 = 1 - w3;

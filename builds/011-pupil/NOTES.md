@@ -3,7 +3,8 @@
 **date** 2026-07-20 · **lineage** 010-archive · **status** alive
 
 A 4,851-parameter neural network — Fourier features → 48 → 48 → RGB —
-training by real stochastic gradient descent, live, in this tab.
+training live in this tab by real backprop with an in-shader Adam
+optimizer.
 Forward passes, backward deltas, and weight updates are all fragment
 shaders; there is no library and no pretrained anything. Each frame
 the network gets six steps of 1,024 random glimpses of a world it
@@ -30,7 +31,11 @@ your camera: it will chase your face and never quite arrive.
   minibatch at its glimpse coordinates, brightness = per-sample loss.
   You are literally watching where SGD is looking, synchronized by
   construction because the sparks *are* the training step.
-- deltas clamped ±4 as divergence insurance; lr 0.16 on batch means.
+- deltas clamped ±4 as divergence insurance; Adam lr 2e-3.
+- **Adam, in a fragment shader**: per-weight moments m and v live in a
+  second render target of the update pass (MRT) — optimizer state is
+  just more state-in-texture. Plain SGD learned the blobs in seconds
+  and then crawled forever; Adam is why detail arrives at all.
 - **the eye gets an EMA**: raw SGD weights jitter at 360 steps/s and the
   belief strobes. The display reads an exponential moving average of
   the weights (α = 0.05) — the optimizer keeps its nerves, the viewer
@@ -47,7 +52,7 @@ your camera: it will chase your face and never quite arrive.
 |------------------|-------|---------------------------------------------|
 | `STEPS_PER_FRAME`| 6     | how fast it learns vs how dreamy it stays   |
 | `B`              | 1024  | glimpse count — smaller = jitterier beliefs |
-| `LR`             | 0.16  | too high and the belief strobes             |
+| `LR`             | 2e-3  | Adam units; higher hallucinates             |
 | FF max ω         | ~19   | finest detail the eye can ever resolve      |
 | world drift      | 0.05  | how fast truth outruns belief               |
 
@@ -69,7 +74,11 @@ your camera: it will chase your face and never quite arrive.
 - keep the training forward pass and the display forward pass
   byte-identical (same hashes, same frequencies) or the belief you
   render is not the belief you trained.
-- SGD at 360 steps/second on a phone-class integrated GPU would
+- the belief pass fetches every weight per pixel; at retina res that
+  is billions of redundant cached reads a second and it spins fans for
+  nothing. Beliefs are soft — render them small (dpr 1, 42% scale) and
+  upscale.
+- SGD at 480 steps/second on a phone-class integrated GPU would
   struggle; the M-series eats it. This build is the repo's first
   where "AI side of things" means the math, not an API.
 
