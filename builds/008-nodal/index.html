@@ -176,10 +176,10 @@ void main() {
   vec2 uv = gl_FragCoord.xy / uRes;
   vec3 c = texture(uTrail, uv).rgb;
 
-  // antinode shimmer — the plate's motion, breathing at audio-ish rate
+  // antinode shimmer — steady, not strobed: the eye should read the
+  // plate's motion as a place, not a flash
   float u = plateU(uv);
-  float ring = abs(u) * (0.55 + 0.45 * sin(uTime * 37.0));
-  c += vec3(0.020, 0.045, 0.075) * ring * 0.55;
+  c += vec3(0.020, 0.045, 0.075) * abs(u) * 0.30;
 
   c = 1.0 - exp(-c * 2.1);
   float v = length(uv - 0.5);

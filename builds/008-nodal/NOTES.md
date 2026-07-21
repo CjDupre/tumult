@@ -64,6 +64,10 @@ plate rattles the sand around it.
 - `getUserMedia` needs a user gesture, so the mic is claimed on first
   click — and the piece must be complete without it, both for the
   headless preview and for anyone who denies the prompt.
+- first cut pulsed the antinode shimmer at ~6 Hz to suggest vibration.
+  On screen that is just a strobe — obnoxious, and gone. Rule learned:
+  vibration too fast to see should render as *place* (steady glow),
+  not as flashing.
 
 ## next
 
