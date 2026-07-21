@@ -102,7 +102,21 @@
     "title": "nodal",
     "date": "2026-07-20",
     "lineage": "007-undertow",
-    "techniques": ["chladni figures", "audio-reactive", "modal synthesis", "overdamped particles"],
-    "blurb": "A million grains of sand on a singing plate. Click once and your microphone chooses the figures — sound in, geometry out. The sand gathers where the plate is still."
+    "techniques": [
+      "chladni figures",
+      "audio-reactive",
+      "modal synthesis",
+      "overdamped particles"
+    ],
+    "blurb": "A million grains of sand on a singing plate. Click once and your microphone chooses the figures \u2014 sound in, geometry out. The sand gathers where the plate is still."
+  },
+  {
+    "id": "009",
+    "slug": "009-tremor",
+    "title": "tremor",
+    "date": "2026-07-20",
+    "lineage": "008-nodal",
+    "techniques": ["real seismic data", "wave equation on a sphere", "data replay", "emergent cartography"],
+    "blurb": "24,451 real earthquakes, 1975 to yesterday, replayed through a wave equation on the globe. No coastlines are stored — the plate boundaries draw themselves. Drag to orbit."
   }
 ]
