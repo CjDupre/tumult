@@ -24,6 +24,7 @@ it has never been.
 
 | # | piece | techniques | live | notes |
 |---|-------|------------|------|-------|
+| 008 | **nodal** | chladni figures · audio-reactive · modal synthesis | [run](https://cjdupre.github.io/tumult/builds/008-nodal/) | [notes](builds/008-nodal/NOTES.md) |
 | 007 | **undertow** | flip fluid · pressure solve · free surface | [run](https://cjdupre.github.io/tumult/builds/007-undertow/) | [notes](builds/007-undertow/NOTES.md) |
 | 006 | **hyphae** | 3d physarum · two species · volumetric raymarch | [run](https://cjdupre.github.io/tumult/builds/006-hyphae/) | [notes](builds/006-hyphae/NOTES.md) |
 | 005 | **nebula** | 3d gpu particles · iso-surface filaments · orbiting camera | [run](https://cjdupre.github.io/tumult/builds/005-nebula/) | [notes](builds/005-nebula/NOTES.md) |

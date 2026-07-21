@@ -88,7 +88,21 @@
     "title": "undertow",
     "date": "2026-07-20",
     "lineage": "006-hyphae",
-    "techniques": ["flip fluid", "pressure solve", "free surface", "gpu particles"],
-    "blurb": "An actual incompressible liquid — 262,144 particles, pressure-projected — in a tank that rolls like a ship's hold. Flick the pointer to throw water."
+    "techniques": [
+      "flip fluid",
+      "pressure solve",
+      "free surface",
+      "gpu particles"
+    ],
+    "blurb": "An actual incompressible liquid \u2014 262,144 particles, pressure-projected \u2014 in a tank that rolls like a ship's hold. Flick the pointer to throw water."
+  },
+  {
+    "id": "008",
+    "slug": "008-nodal",
+    "title": "nodal",
+    "date": "2026-07-20",
+    "lineage": "007-undertow",
+    "techniques": ["chladni figures", "audio-reactive", "modal synthesis", "overdamped particles"],
+    "blurb": "A million grains of sand on a singing plate. Click once and your microphone chooses the figures — sound in, geometry out. The sand gathers where the plate is still."
   }
 ]
