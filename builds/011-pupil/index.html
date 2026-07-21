@@ -17,7 +17,7 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hint">a 2,339-parameter neural network, training by backprop in this tab right now &middot; the image is its current belief &middot; the sparks are its training samples, bright where it is most wrong &middot; move to stir its world; click to show it your camera</div>
+<div id="hint">a 4,851-parameter neural network, training by backprop in this tab right now &middot; the image is its current belief &middot; the sparks are its training samples, bright where it is most wrong &middot; move to stir its world; click to show it your camera</div>
 
 <!-- ============================================================
      PUPIL. An MLP — Fourier features → 32 → 32 → RGB — trained
@@ -83,7 +83,7 @@ out vec4 outC;
 void main() {
   int b = int(gl_FragCoord.x), i = int(gl_FragCoord.y);
   float z = texelFetch(uW, ivec2(uInN, i), 0).r;          // bias
-  for (int j = 0; j < 32; j++) {
+  for (int j = 0; j < 48; j++) {
     if (j >= uInN) break;
     z += texelFetch(uW, ivec2(j, i), 0).r * texelFetch(uIn, ivec2(b, j), 0).r;
   }
@@ -95,7 +95,7 @@ void main() {
 <script type="x-shader/fragment" id="d3-fs">#version 300 es
 precision highp float;
 uniform sampler2D uW3, uH2, uCoord, uCam;
-uniform float uTime, uUseCam, uAspect;
+uniform float uTime, uUseCam, uAspect, uCamAspect;
 uniform vec2 uMouse;
 out vec4 outC;
 
@@ -128,13 +128,17 @@ vec3 world(vec2 uv) {
 
 void main() {
   int b = int(gl_FragCoord.x), c = int(gl_FragCoord.y);
-  float z = texelFetch(uW3, ivec2(32, c), 0).r;
-  for (int j = 0; j < 32; j++)
+  float z = texelFetch(uW3, ivec2(48, c), 0).r;
+  for (int j = 0; j < 48; j++)
     z += texelFetch(uW3, ivec2(j, c), 0).r * texelFetch(uH2, ivec2(b, j), 0).r;
   vec2 uv = texelFetch(uCoord, ivec2(b, 0), 0).xy;
   vec3 tgt;
   if (uUseCam > 0.5) {
-    vec2 cuv = vec2(1.0 - uv.x, uv.y);   // mirrored, cover-cropped upstream
+    // cover-crop the camera to the canvas aspect, mirrored
+    vec2 q = uv - 0.5;
+    vec2 cuv = (q * vec2(uAspect, 1.0) / max(1.0, uAspect / uCamAspect))
+             / vec2(uCamAspect, 1.0) + 0.5;
+    cuv.x = 1.0 - cuv.x;
     tgt = texture(uCam, cuv).rgb;
   } else {
     tgt = world(uv);
@@ -153,7 +157,7 @@ out vec4 outC;
 void main() {
   int b = int(gl_FragCoord.x), j = int(gl_FragCoord.y);
   float s = 0.0;
-  for (int i = 0; i < 32; i++) {
+  for (int i = 0; i < 48; i++) {
     if (i >= uNextN) break;
     s += texelFetch(uWnext, ivec2(j, i), 0).r * texelFetch(uDnext, ivec2(b, i), 0).r;
   }
@@ -189,6 +193,22 @@ void main() {
 }
 </script>
 
+<!-- smoothed display weights: SGD jitters at 360 steps/s, and raw
+     weights strobe the belief. The eye gets an exponential moving
+     average; the optimizer keeps its nerves to itself -->
+<script type="x-shader/fragment" id="ema-fs">#version 300 es
+precision highp float;
+uniform sampler2D uWE, uW;
+uniform float uInit;
+out vec4 outC;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  float w = texelFetch(uW, q, 0).r;
+  float e = uInit > 0.5 ? w : mix(texelFetch(uWE, q, 0).r, w, 0.05);
+  outC = vec4(e, 0.0, 0.0, 0.0);
+}
+</script>
+
 <!-- display: run the whole network for every pixel — the belief -->
 <script type="x-shader/fragment" id="disp-fs">#version 300 es
 precision highp float;
@@ -204,28 +224,28 @@ void main() {
   vec2 uv = gl_FragCoord.xy / uRes;
   vec2 p = uv - 0.5;
 
-  float F[32]; float H1[32]; float H2[32];
-  for (int j = 0; j < 32; j++) {
+  float F[48]; float H1[48]; float H2[48];
+  for (int j = 0; j < 48; j++) {
     int k = j >> 1;
     float ang = hash1(vec2(float(k), 3.1)) * 6.2831853;
     float om  = 2.0 + hash1(vec2(float(k), 9.7)) * 17.0;
     float ph  = om * dot(vec2(cos(ang), sin(ang)), p);
     F[j] = (j & 1) == 0 ? sin(ph) : cos(ph);
   }
-  for (int i = 0; i < 32; i++) {
-    float z = texelFetch(uW1, ivec2(32, i), 0).r;
-    for (int j = 0; j < 32; j++) z += texelFetch(uW1, ivec2(j, i), 0).r * F[j];
+  for (int i = 0; i < 48; i++) {
+    float z = texelFetch(uW1, ivec2(48, i), 0).r;
+    for (int j = 0; j < 48; j++) z += texelFetch(uW1, ivec2(j, i), 0).r * F[j];
     H1[i] = tanh(z);
   }
-  for (int i = 0; i < 32; i++) {
-    float z = texelFetch(uW2, ivec2(32, i), 0).r;
-    for (int j = 0; j < 32; j++) z += texelFetch(uW2, ivec2(j, i), 0).r * H1[j];
+  for (int i = 0; i < 48; i++) {
+    float z = texelFetch(uW2, ivec2(48, i), 0).r;
+    for (int j = 0; j < 48; j++) z += texelFetch(uW2, ivec2(j, i), 0).r * H1[j];
     H2[i] = tanh(z);
   }
   vec3 col;
   for (int c = 0; c < 3; c++) {
-    float z = texelFetch(uW3, ivec2(32, c), 0).r;
-    for (int j = 0; j < 32; j++) z += texelFetch(uW3, ivec2(j, c), 0).r * H2[j];
+    float z = texelFetch(uW3, ivec2(48, c), 0).r;
+    for (int j = 0; j < 48; j++) z += texelFetch(uW3, ivec2(j, c), 0).r * H2[j];
     col[c] = z;
   }
   col = clamp(col, 0.0, 1.0);
@@ -257,12 +277,12 @@ precision highp float;
 in float vErr;
 out vec4 outC;
 void main() {
-  outC = vec4(vec3(1.0, 0.9, 0.7) * min(vErr * 0.5, 1.0) * 0.75, 1.0);
+  outC = vec4(vec3(1.0, 0.9, 0.7) * min(vErr * 0.5, 1.0) * 0.45, 1.0);
 }
 </script>
 
 <script>
-const B = 1024, NH = 32, STEPS_PER_FRAME = 6;
+const B = 1024, NH = 48, STEPS_PER_FRAME = 6;
 const canvas = document.getElementById('c');
 const gl = canvas.getContext('webgl2', { antialias: false });
 const canFloat = gl && gl.getExtension('EXT_color_buffer_float');
@@ -292,6 +312,7 @@ const P = {
   sgd:   program('quad-vs', 'sgd-fs'),
   disp:  program('quad-vs', 'disp-fs'),
   spark: program('spark-vs', 'spark-fs'),
+  ema:   program('quad-vs', 'ema-fs'),
 };
 const U = {};
 for (const [name, prog] of Object.entries(P)) {
@@ -335,10 +356,16 @@ const D3 = makeTex(B, 3,  gl.R32F);
 const D2 = makeTex(B, NH, gl.R32F);
 const D1 = makeTex(B, NH, gl.R32F);
 // weights: 33 columns (32 in + bias), ping-pong
-const W1 = [makeTex(33, NH, gl.R32F), makeTex(33, NH, gl.R32F)];
-const W2 = [makeTex(33, NH, gl.R32F), makeTex(33, NH, gl.R32F)];
-const W3 = [makeTex(33, 3,  gl.R32F), makeTex(33, 3,  gl.R32F)];
+const W1 = [makeTex(49, NH, gl.R32F), makeTex(49, NH, gl.R32F)];
+const W2 = [makeTex(49, NH, gl.R32F), makeTex(49, NH, gl.R32F)];
+const W3 = [makeTex(49, 3,  gl.R32F), makeTex(49, 3,  gl.R32F)];
 let w1 = 0, w2 = 0, w3 = 0, needInit = true;
+
+// the eye's copy of the weights — EMA-smoothed, strobe-free
+const WE1 = [makeTex(49, NH, gl.R32F), makeTex(49, NH, gl.R32F)];
+const WE2 = [makeTex(49, NH, gl.R32F), makeTex(49, NH, gl.R32F)];
+const WE3 = [makeTex(49, 3,  gl.R32F), makeTex(49, 3,  gl.R32F)];
+let e1 = 0, e2 = 0, e3 = 0, emaInit = true;
 
 // camera (offered on click)
 const camTex = makeTex(64, 64, gl.RGBA8);   // replaced on first frame
@@ -409,7 +436,7 @@ function pass(prog, dst, binds, setu) {
 
 let simT = 0, stepIdx = 0;
 const DT = 1 / 60;
-const LR = 0.22;
+const LR = 0.16;
 
 function trainStep() {
   stepIdx++;
@@ -417,23 +444,24 @@ function trainStep() {
 
   pass(P.coord, COORD, [], () => gl.uniform1f(u.coord.uStep, stepIdx));
   pass(P.h0, H0, [[u.h0.uCoord, COORD.tex]]);
-  pass(P.fwd, H1, [[u.fwd.uW, W1[w1].tex], [u.fwd.uIn, H0.tex]], () => gl.uniform1i(u.fwd.uInN, 32));
-  pass(P.fwd, H2, [[u.fwd.uW, W2[w2].tex], [u.fwd.uIn, H1.tex]], () => gl.uniform1i(u.fwd.uInN, 32));
+  pass(P.fwd, H1, [[u.fwd.uW, W1[w1].tex], [u.fwd.uIn, H0.tex]], () => gl.uniform1i(u.fwd.uInN, 48));
+  pass(P.fwd, H2, [[u.fwd.uW, W2[w2].tex], [u.fwd.uIn, H1.tex]], () => gl.uniform1i(u.fwd.uInN, 48));
   pass(P.d3, D3, [[u.d3.uW3, W3[w3].tex], [u.d3.uH2, H2.tex], [u.d3.uCoord, COORD.tex],
                   [u.d3.uCam, camReady ? realCamTex : camTex.tex]], () => {
     gl.uniform1f(u.d3.uTime, simT);
     gl.uniform1f(u.d3.uUseCam, camReady ? 1 : 0);
     gl.uniform1f(u.d3.uAspect, W / H);
+    gl.uniform1f(u.d3.uCamAspect, camW / camH);
     gl.uniform2f(u.d3.uMouse, mouse.x, mouse.y);
   });
   pass(P.back, D2, [[u.back.uWnext, W3[w3].tex], [u.back.uDnext, D3.tex], [u.back.uH, H2.tex]],
     () => gl.uniform1i(u.back.uNextN, 3));
   pass(P.back, D1, [[u.back.uWnext, W2[w2].tex], [u.back.uDnext, D2.tex], [u.back.uH, H1.tex]],
-    () => gl.uniform1i(u.back.uNextN, 32));
+    () => gl.uniform1i(u.back.uNextN, 48));
 
   const sgd = (Wpair, cur, Dtex, Atex, seed, scale) => {
     pass(P.sgd, Wpair[1 - cur], [[u.sgd.uW, Wpair[cur].tex], [u.sgd.uD, Dtex], [u.sgd.uA, Atex]], () => {
-      gl.uniform1i(u.sgd.uInN, 32);
+      gl.uniform1i(u.sgd.uInN, 48);
       gl.uniform1f(u.sgd.uLR, LR);
       gl.uniform1f(u.sgd.uReset, needInit ? 1 : 0);
       gl.uniform1f(u.sgd.uSeed, seed);
@@ -449,11 +477,19 @@ function trainStep() {
 function step() {
   simT += DT;
   for (let s = 0; s < STEPS_PER_FRAME; s++) trainStep();
+  const ema = (WE, cur, Wt) => {
+    pass(P.ema, WE[1 - cur], [[U.ema.uWE, WE[cur].tex], [U.ema.uW, Wt]],
+      () => gl.uniform1f(U.ema.uInit, emaInit ? 1 : 0));
+  };
+  ema(WE1, e1, W1[w1].tex); e1 = 1 - e1;
+  ema(WE2, e2, W2[w2].tex); e2 = 1 - e2;
+  ema(WE3, e3, W3[w3].tex); e3 = 1 - e3;
+  emaInit = false;
 }
 
 function render() {
   // the belief, at 55% resolution — beliefs are soft
-  pass(P.disp, RS, [[U.disp.uW1, W1[w1].tex], [U.disp.uW2, W2[w2].tex], [U.disp.uW3, W3[w3].tex]],
+  pass(P.disp, RS, [[U.disp.uW1, WE1[e1].tex], [U.disp.uW2, WE2[e2].tex], [U.disp.uW3, WE3[e3].tex]],
     () => gl.uniform2f(U.disp.uRes, RS.w, RS.h));
 
   // upscale to screen (RGBA8 → RGBA8, so blit is legal)

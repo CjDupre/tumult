@@ -2,7 +2,7 @@
 
 **date** 2026-07-20 · **lineage** 010-archive · **status** alive
 
-A 2,339-parameter neural network — Fourier features → 32 → 32 → RGB —
+A 4,851-parameter neural network — Fourier features → 48 → 48 → RGB —
 training by real stochastic gradient descent, live, in this tab.
 Forward passes, backward deltas, and weight updates are all fragment
 shaders; there is no library and no pretrained anything. Each frame
@@ -30,7 +30,12 @@ your camera: it will chase your face and never quite arrive.
   minibatch at its glimpse coordinates, brightness = per-sample loss.
   You are literally watching where SGD is looking, synchronized by
   construction because the sparks *are* the training step.
-- deltas clamped ±4 as divergence insurance; lr 0.22 on batch means.
+- deltas clamped ±4 as divergence insurance; lr 0.16 on batch means.
+- **the eye gets an EMA**: raw SGD weights jitter at 360 steps/s and the
+  belief strobes. The display reads an exponential moving average of
+  the weights (α = 0.05) — the optimizer keeps its nerves, the viewer
+  gets calm. Same fix as 008's lesson: fast oscillation must render
+  as a place, not a flash.
 - the fallback world is domain-warped ink in the house palette; the
   webcam replaces it mid-training, and the network repaints itself
   from ink to face without resetting — watching that handover is the
@@ -42,7 +47,7 @@ your camera: it will chase your face and never quite arrive.
 |------------------|-------|---------------------------------------------|
 | `STEPS_PER_FRAME`| 6     | how fast it learns vs how dreamy it stays   |
 | `B`              | 1024  | glimpse count — smaller = jitterier beliefs |
-| `LR`             | 0.22  | too high and belief hallucinates rainbow    |
+| `LR`             | 0.16  | too high and the belief strobes             |
 | FF max ω         | ~19   | finest detail the eye can ever resolve      |
 | world drift      | 0.05  | how fast truth outruns belief               |
 
@@ -55,10 +60,12 @@ your camera: it will chase your face and never quite arrive.
   model. Data-driven art means art direction happens in the data.
 - `blitFramebuffer` refuses float→fixed-point: the belief buffer must
   be RGBA8, which costs nothing since belief is clamped anyway.
-- a 32-wide MLP under-fits on purpose. Under-fitting IS the
+- the camera must be cover-cropped to the canvas aspect or the
+  network diligently learns a squashed face.
+- a 48-wide MLP under-fits on purpose. Under-fitting IS the
   aesthetic: too much capacity and the piece converges into a plain
-  screenshot of the target; too little and it stays mud. 2,339
-  parameters is a portrait painter with a mile-wide brush.
+  screenshot of the target; too little and it stays mud. 4,851
+  parameters is a portrait painter with a wide, soft brush.
 - keep the training forward pass and the display forward pass
   byte-identical (same hashes, same frequencies) or the belief you
   render is not the belief you trained.
