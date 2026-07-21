@@ -1,0 +1,851 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>impasto — the machine repaints what it learns</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #hint {
+    position: fixed; bottom: 12px; left: 14px;
+    font: 12px/1.4 ui-monospace, monospace; color: rgba(255,255,255,.45);
+    user-select: none; pointer-events: none;
+    transition: opacity 2s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">the engram of 012 still learns underneath &middot; but now a painter with ~500 brushes a frame repaints only where its canvas disagrees with the belief &middot; strokes follow the image's grain; the gloss is the paint's thickness &middot; click for camera</div>
+
+<!-- ============================================================
+     ENGRAM. 011's pupil could never see clearly — a plain MLP is
+     nearsighted by construction. This is the cure, the same one
+     that made "NeRF in seconds" possible: multiresolution
+     TRAINABLE FEATURE GRIDS. Five grids (24² … 384²) each store a
+     learned 2-vector per cell; a sample bilinearly gathers them,
+     a small MLP turns features into color, and backprop pushes
+     gradients THROUGH the MLP INTO the grid cells — scattered
+     with the same additive point-splat as 007's fluid. Coarse
+     grids converge in a blink, fine grids etch detail: the image
+     develops like a photograph. And the grids decay gently, so
+     the memory fades wherever the eye stops looking.
+============================================================ -->
+
+<script type="x-shader/vertex" id="quad-vs">#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script type="x-shader/fragment" id="coord-fs">#version 300 es
+precision highp float;
+uniform float uStep;
+out vec4 outC;
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+void main() {
+  float b = floor(gl_FragCoord.x);
+  outC = vec4(hash1(vec2(b * 0.731 + 1.3, uStep * 0.917)),
+              hash1(vec2(uStep * 0.613, b * 0.377 + 7.1)), 0.0, 0.0);
+}
+</script>
+
+<!-- encoding: rows 0–9 = bilinear features from the five grids,
+     rows 10–11 = raw centered coords -->
+<script type="x-shader/fragment" id="h0-fs">#version 300 es
+precision highp float;
+uniform sampler2D uCoord, uG0, uG1, uG2, uG3, uG4;
+out vec4 outC;
+
+vec2 bil(sampler2D g, vec2 c, float S) {
+  vec2 q = c * S - 0.5;
+  vec2 i0 = floor(q), fr = q - i0;
+  ivec2 a = ivec2(clamp(i0,        vec2(0.0), vec2(S - 1.0)));
+  ivec2 d = ivec2(clamp(i0 + 1.0,  vec2(0.0), vec2(S - 1.0)));
+  return mix(mix(texelFetch(g, a, 0).rg,             texelFetch(g, ivec2(d.x, a.y), 0).rg, fr.x),
+             mix(texelFetch(g, ivec2(a.x, d.y), 0).rg, texelFetch(g, d, 0).rg,             fr.x), fr.y);
+}
+
+void main() {
+  int b = int(gl_FragCoord.x), j = int(gl_FragCoord.y);
+  vec2 c = texelFetch(uCoord, ivec2(b, 0), 0).xy;
+  // no raw-coordinate input: every spatial fact must live in a grid
+  // cell, or the MLP learns a lazy smooth picture and ignores them
+  int l = j >> 1, f = j & 1;
+  vec2 e = l == 0 ? bil(uG0, c, 24.0)
+         : l == 1 ? bil(uG1, c, 48.0)
+         : l == 2 ? bil(uG2, c, 96.0)
+         : l == 3 ? bil(uG3, c, 192.0)
+         :          bil(uG4, c, 384.0);
+  outC = vec4(f == 0 ? e.x : e.y, 0.0, 0.0, 0.0);
+}
+</script>
+
+<script type="x-shader/fragment" id="fwd-fs">#version 300 es
+precision highp float;
+uniform sampler2D uW, uIn;
+uniform int uInN;
+out vec4 outC;
+void main() {
+  int b = int(gl_FragCoord.x), i = int(gl_FragCoord.y);
+  float z = texelFetch(uW, ivec2(uInN, i), 0).r;
+  for (int j = 0; j < 32; j++) {
+    if (j >= uInN) break;
+    z += texelFetch(uW, ivec2(j, i), 0).r * texelFetch(uIn, ivec2(b, j), 0).r;
+  }
+  outC = vec4(tanh(z), 0.0, 0.0, 0.0);
+}
+</script>
+
+<script type="x-shader/fragment" id="d3-fs">#version 300 es
+precision highp float;
+uniform sampler2D uW3, uH2, uCoord, uCam;
+uniform float uTime, uUseCam, uAspect, uCamAspect;
+uniform vec2 uMouse;
+out vec4 outC;
+
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash1(i), hash1(i + vec2(1, 0)), f.x),
+             mix(hash1(i + vec2(0, 1)), hash1(i + vec2(1, 1)), f.x), f.y);
+}
+vec3 world(vec2 uv) {
+  vec2 p = (uv - 0.5) * vec2(uAspect, 1.0);
+  vec2 m = (uMouse - 0.5) * vec2(uAspect, 1.0);
+  vec2 d = p - m;
+  p += normalize(vec2(-d.y, d.x) + 1e-4) * exp(-dot(d, d) * 14.0) * 0.25;
+  float t = uTime * 0.05;
+  vec2 w = vec2(vnoise(p * 2.3 + t), vnoise(p * 2.3 - t * 0.7 + 4.2));
+  float n = vnoise(p * 3.1 + (w - 0.5) * 1.8 + vec2(t * 0.6, -t * 0.4));
+  // an oil palette, not a glow palette: paintings live in midtones,
+  // and shadows are cool ultramarine — never canvas-brown
+  vec3 c = vec3(0.50, 0.46, 0.43)
+         + vec3(0.34, 0.30, 0.26) * cos(6.2831853 * (n * 0.9 + vec3(0.52, 0.38, 0.18)) + t * 0.3);
+  c *= 0.70 + 0.45 * n;
+  c += vec3(0.02, 0.05, 0.13) * (1.0 - n);
+  // filigree: detail only the fine grids can hold — the sharpness test
+  float fine = vnoise(p * 18.0 + (w - 0.5) * 3.0 + vec2(-t * 0.3, t * 0.5));
+  c += vec3(0.85, 0.70, 0.45) * smoothstep(0.045, 0.0, abs(fine - 0.5)) * (0.2 + 0.4 * n);
+  return clamp(c, 0.0, 1.0);
+}
+
+void main() {
+  int b = int(gl_FragCoord.x), c = int(gl_FragCoord.y);
+  float z = texelFetch(uW3, ivec2(32, c), 0).r;
+  for (int j = 0; j < 32; j++)
+    z += texelFetch(uW3, ivec2(j, c), 0).r * texelFetch(uH2, ivec2(b, j), 0).r;
+  vec2 uv = texelFetch(uCoord, ivec2(b, 0), 0).xy;
+  vec3 tgt;
+  if (uUseCam > 0.5) {
+    vec2 q = uv - 0.5;
+    vec2 cuv = (q * vec2(uAspect, 1.0) / max(1.0, uAspect / uCamAspect))
+             / vec2(uCamAspect, 1.0) + 0.5;
+    cuv.x = 1.0 - cuv.x;
+    tgt = texture(uCam, cuv).rgb;
+  } else {
+    tgt = world(uv);
+  }
+  float t = c == 0 ? tgt.r : c == 1 ? tgt.g : tgt.b;
+  outC = vec4(clamp(z - t, -4.0, 4.0), 0.0, 0.0, 0.0);
+}
+</script>
+
+<!-- backward through a layer; uLinear skips the tanh′ for the
+     encoding layer (features are linear inputs) -->
+<script type="x-shader/fragment" id="back-fs">#version 300 es
+precision highp float;
+uniform sampler2D uWnext, uDnext, uH;
+uniform int uNextN;
+uniform float uLinear;
+out vec4 outC;
+void main() {
+  int b = int(gl_FragCoord.x), j = int(gl_FragCoord.y);
+  float s = 0.0;
+  for (int i = 0; i < 32; i++) {
+    if (i >= uNextN) break;
+    s += texelFetch(uWnext, ivec2(j, i), 0).r * texelFetch(uDnext, ivec2(b, i), 0).r;
+  }
+  float h = texelFetch(uH, ivec2(b, j), 0).r;
+  float fac = uLinear > 0.5 ? 1.0 : 1.0 - h * h;
+  outC = vec4(clamp(s * fac, -4.0, 4.0), 0.0, 0.0, 0.0);
+}
+</script>
+
+<!-- scatter feature gradients into a grid — 007's P2G, reborn as
+     the backward pass of an encoding -->
+<script type="x-shader/vertex" id="scat-vs">#version 300 es
+precision highp float;
+uniform sampler2D uCoord, uD0;
+uniform float uSize;
+uniform int uLvl;
+out vec2 vP;
+flat out vec2 vG;
+void main() {
+  int b = gl_VertexID;
+  vec2 c = texelFetch(uCoord, ivec2(b, 0), 0).xy;
+  vP = c * uSize;
+  vG = vec2(texelFetch(uD0, ivec2(b, uLvl * 2), 0).r,
+            texelFetch(uD0, ivec2(b, uLvl * 2 + 1), 0).r);
+  gl_Position = vec4(c * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = 3.0;
+}
+</script>
+<script type="x-shader/fragment" id="scat-fs">#version 300 es
+precision highp float;
+in vec2 vP;
+flat in vec2 vG;
+out vec4 outC;
+void main() {
+  vec2 d = abs(gl_FragCoord.xy - vP);
+  float w = max(0.0, 1.0 - d.x) * max(0.0, 1.0 - d.y);
+  outC = vec4(vG * w, 0.0, 0.0);
+}
+</script>
+
+<!-- Adam for a grid level: features + moments in one MRT pass.
+     uDecay is the forgetting — memory fades where gradients stop -->
+<script type="x-shader/fragment" id="gadam-fs">#version 300 es
+precision highp float;
+uniform sampler2D uG, uMV, uGrad;
+uniform float uLR, uT, uReset, uDecay, uSeed;
+layout(location = 0) out vec4 outG;
+layout(location = 1) out vec4 outMV;
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  if (uReset > 0.5) {
+    outG = vec4((hash1(gl_FragCoord.xy * 0.913 + uSeed) - 0.5) * 0.2,
+                (hash1(gl_FragCoord.xy * 1.371 - uSeed) - 0.5) * 0.2, 0.0, 0.0);
+    outMV = vec4(0.0);
+    return;
+  }
+  vec2 g = texelFetch(uGrad, q, 0).rg / 2048.0;
+  vec4 mv = texelFetch(uMV, q, 0);
+  vec2 m = mix(g,     mv.xy, 0.9);
+  vec2 v = mix(g * g, mv.zw, 0.999);
+  vec2 mh = m / (1.0 - pow(0.9,   uT));
+  vec2 vh = v / (1.0 - pow(0.999, uT));
+  vec2 f = (texelFetch(uG, q, 0).rg - uLR * mh / (sqrt(vh) + 1e-6)) * uDecay;
+  outG = vec4(clamp(f, -3.0, 3.0), 0.0, 0.0);
+  outMV = vec4(m, v);
+}
+</script>
+
+<!-- Adam for the MLP (011's, with its perpetual-run lessons) -->
+<script type="x-shader/fragment" id="wadam-fs">#version 300 es
+precision highp float;
+uniform sampler2D uW, uMV, uD, uA;
+uniform int uInN;
+uniform float uLR, uReset, uSeed, uScale, uT;
+layout(location = 0) out vec4 outW;
+layout(location = 1) out vec4 outMV;
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+void main() {
+  int j = int(gl_FragCoord.x), i = int(gl_FragCoord.y);
+  if (uReset > 0.5) {
+    outW = vec4((hash1(vec2(float(j) * 1.7 + 0.3, float(i) * 2.9 + uSeed)) - 0.5) * uScale, 0, 0, 0);
+    outMV = vec4(0.0);
+    return;
+  }
+  float g = 0.0;
+  for (int b = 0; b < 2048; b++) {
+    float a = j == uInN ? 1.0 : texelFetch(uA, ivec2(b, j), 0).r;
+    g += texelFetch(uD, ivec2(b, i), 0).r * a;
+  }
+  g /= 2048.0;
+  vec2 mv = texelFetch(uMV, ivec2(j, i), 0).rg;
+  float m = mix(g,     mv.x, 0.9);
+  float v = mix(g * g, mv.y, 0.999);
+  float mh = m / (1.0 - pow(0.9,   uT));
+  float vh = v / (1.0 - pow(0.999, uT));
+  float w = (texelFetch(uW, ivec2(j, i), 0).r - uLR * mh / (sqrt(vh) + 1e-6)) * 0.99985;
+  outW = vec4(clamp(w, -3.0, 3.0), 0, 0, 0);
+  outMV = vec4(m, v, 0.0, 0.0);
+}
+</script>
+
+<!-- EMA of any parameter texture: the eye's calm copy -->
+<script type="x-shader/fragment" id="ema-fs">#version 300 es
+precision highp float;
+uniform sampler2D uWE, uW;
+uniform float uInit;
+out vec4 outC;
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy);
+  vec4 w = texelFetch(uW, q, 0);
+  outC = uInit > 0.5 ? w : mix(texelFetch(uWE, q, 0), w, 0.08);
+}
+</script>
+
+<!-- display: encoding + MLP per pixel — the memory, read out -->
+<script type="x-shader/fragment" id="disp-fs">#version 300 es
+precision highp float;
+uniform sampler2D uG0, uG1, uG2, uG3, uG4, uW1, uW2, uW3;
+uniform vec2 uRes;
+out vec4 outC;
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+vec2 bil(sampler2D g, vec2 c, float S) {
+  vec2 q = c * S - 0.5;
+  vec2 i0 = floor(q), fr = q - i0;
+  ivec2 a = ivec2(clamp(i0,       vec2(0.0), vec2(S - 1.0)));
+  ivec2 d = ivec2(clamp(i0 + 1.0, vec2(0.0), vec2(S - 1.0)));
+  return mix(mix(texelFetch(g, a, 0).rg,               texelFetch(g, ivec2(d.x, a.y), 0).rg, fr.x),
+             mix(texelFetch(g, ivec2(a.x, d.y), 0).rg, texelFetch(g, d, 0).rg,               fr.x), fr.y);
+}
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+
+  float F[10]; float H1[32]; float H2[32];
+  vec2 e0 = bil(uG0, uv, 24.0),  e1 = bil(uG1, uv, 48.0),  e2 = bil(uG2, uv, 96.0);
+  vec2 e3 = bil(uG3, uv, 192.0), e4 = bil(uG4, uv, 384.0);
+  F[0] = e0.x; F[1] = e0.y; F[2] = e1.x; F[3] = e1.y; F[4] = e2.x; F[5] = e2.y;
+  F[6] = e3.x; F[7] = e3.y; F[8] = e4.x; F[9] = e4.y;
+
+  for (int i = 0; i < 32; i++) {
+    float z = texelFetch(uW1, ivec2(10, i), 0).r;
+    for (int j = 0; j < 10; j++) z += texelFetch(uW1, ivec2(j, i), 0).r * F[j];
+    H1[i] = tanh(z);
+  }
+  for (int i = 0; i < 32; i++) {
+    float z = texelFetch(uW2, ivec2(32, i), 0).r;
+    for (int j = 0; j < 32; j++) z += texelFetch(uW2, ivec2(j, i), 0).r * H1[j];
+    H2[i] = tanh(z);
+  }
+  vec3 col;
+  for (int c = 0; c < 3; c++) {
+    float z = texelFetch(uW3, ivec2(32, c), 0).r;
+    for (int j = 0; j < 32; j++) z += texelFetch(uW3, ivec2(j, c), 0).r * H2[j];
+    col[c] = z;
+  }
+  col = clamp(col, 0.0, 1.0);
+  float v = length(uv - 0.5);
+  col *= 1.0 - 0.35 * v * v;
+  col += (hash1(gl_FragCoord.xy * 0.71) - 0.5) * 0.012;
+  outC = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.9)), 1.0);
+}
+</script>
+
+
+<!-- ============================================================
+     THE PAINTER. Every frame, ~500 brush strokes sample the
+     network's belief: color from the field, orientation along the
+     image's contours (long lazy strokes in flat paint, short dabs
+     on edges), opacity from the ERROR between the canvas and the
+     belief — so the painter only reworks what changed. Strokes
+     deposit thickness; the display lights the ridges. The canvas
+     is never cleared: it is recomposed.
+============================================================ -->
+<script type="x-shader/fragment" id="copy-fs">#version 300 es
+precision highp float;
+uniform sampler2D uSrc;
+out vec4 outC;
+void main() { outC = texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0); }
+</script>
+
+<script type="x-shader/vertex" id="stroke-vs">#version 300 es
+precision highp float;
+uniform sampler2D uBelief, uPrev;
+uniform vec2 uCRes;
+uniform float uFrame;
+out vec3 vCol;
+out float vAng, vAlpha, vSeed;
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+vec2 hash2(vec2 p) {
+  vec3 a = fract(p.xyx * vec3(123.34, 234.34, 345.65));
+  a += dot(a, a + 34.45);
+  return fract(vec2(a.x * a.y, a.y * a.z));
+}
+void main() {
+  float id = float(gl_VertexID);
+  vec2 uv = hash2(vec2(id, uFrame));
+  vec3 b = texture(uBelief, uv).rgb;
+  vec4 pc = texture(uPrev, uv);
+  // bare canvas counts as wrong no matter the color — dark paint is
+  // still paint, or the night regions never get painted at all
+  float unpainted = 1.0 - smoothstep(0.05, 0.25, pc.a);
+  float err = max(dot(abs(b - pc.rgb), vec3(0.3333)), unpainted * 0.3);
+
+  vec2 e = vec2(2.0) / uCRes;
+  float gx = dot(texture(uBelief, uv + vec2(e.x, 0)).rgb - texture(uBelief, uv - vec2(e.x, 0)).rgb, vec3(0.3333));
+  float gy = dot(texture(uBelief, uv + vec2(0, e.y)).rgb - texture(uBelief, uv - vec2(0, e.y)).rgb, vec3(0.3333));
+  float gm = length(vec2(gx, gy));
+  float edgy = smoothstep(0.015, 0.12, gm);
+  float flowA = 2.2 * sin(uv.x * 3.7 + uv.y * 5.3) + uv.y * 2.1;   // lazy flow for flat paint
+  float ang = mix(flowA, atan(gy, gx) + 1.5708, edgy);
+
+  vAng = ang;
+  vAlpha = 0.06 + 0.9 * smoothstep(0.035, 0.28, err);
+  vCol = b * (0.90 + 0.20 * hash1(vec2(id * 1.7, uFrame)));
+  vSeed = hash1(vec2(id, uFrame * 0.31));
+  gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = mix(48.0, 15.0, edgy) * (0.7 + 0.6 * hash1(vec2(id, uFrame + 3.3)));
+}
+</script>
+<script type="x-shader/fragment" id="stroke-fs">#version 300 es
+precision highp float;
+in vec3 vCol;
+in float vAng, vAlpha, vSeed;
+out vec4 outC;
+void main() {
+  vec2 q = gl_PointCoord - 0.5;
+  float ca = cos(vAng), sa = sin(vAng);
+  vec2 r = vec2(ca * q.x + sa * q.y, -sa * q.x + ca * q.y);   // x along, y across
+  float across = r.y / 0.34;
+  float mask = smoothstep(0.50, 0.40, abs(r.x) + 0.13 * sin(across * 6.0 + vSeed * 25.0))
+             * smoothstep(0.50, 0.28, abs(across));
+  mask *= 0.78 + 0.22 * sin(across * 9.0 + vSeed * 40.0);     // bristles
+  float a = clamp(mask, 0.0, 1.0) * vAlpha;
+  outC = vec4(vCol, a);
+}
+</script>
+
+<!-- present: the canvas, lit — thickness ridges catch the light -->
+<script type="x-shader/fragment" id="paint-fs">#version 300 es
+precision highp float;
+uniform sampler2D uCanvas;
+uniform vec2 uRes;
+out vec4 outC;
+float hash1(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec4 c = texture(uCanvas, uv);
+  vec2 e = vec2(1.5) / uRes;
+  float hx = texture(uCanvas, uv + vec2(e.x, 0)).a - texture(uCanvas, uv - vec2(e.x, 0)).a;
+  float hy = texture(uCanvas, uv + vec2(0, e.y)).a - texture(uCanvas, uv - vec2(0, e.y)).a;
+  vec3 n = normalize(vec3(-hx * 3.0, -hy * 3.0, 1.0));
+  vec3 L = normalize(vec3(-0.5, 0.6, 0.75));
+  float diff = 0.72 + 0.38 * max(dot(n, L), 0.0);
+  float spec = pow(max(dot(reflect(-L, n), vec3(0.0, 0.0, 1.0)), 0.0), 26.0)
+             * 0.35 * smoothstep(0.05, 0.5, c.a);
+
+  float painted = smoothstep(0.0, 0.12, c.a);
+  vec3 ground = vec3(0.105, 0.090, 0.075) * (0.8 + 0.4 * hash1(floor(uv * uRes * 0.5)));
+  vec3 col = mix(ground, c.rgb * diff + vec3(spec), painted);
+
+  float v = length(uv - 0.5);
+  col *= 1.0 - 0.35 * v * v;
+  outC = vec4(pow(clamp(col, 0.0, 1.0), vec3(0.9)), 1.0);
+}
+</script>
+
+<script type="x-shader/vertex" id="spark-vs">#version 300 es
+precision highp float;
+uniform sampler2D uCoord, uD3;
+out float vErr;
+void main() {
+  int b = gl_VertexID;
+  vec2 uv = texelFetch(uCoord, ivec2(b, 0), 0).xy;
+  float e = abs(texelFetch(uD3, ivec2(b, 0), 0).r)
+          + abs(texelFetch(uD3, ivec2(b, 1), 0).r)
+          + abs(texelFetch(uD3, ivec2(b, 2), 0).r);
+  gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+  gl_PointSize = 2.0;
+  vErr = e;
+}
+</script>
+<script type="x-shader/fragment" id="spark-fs">#version 300 es
+precision highp float;
+in float vErr;
+out vec4 outC;
+void main() {
+  outC = vec4(vec3(1.0, 0.9, 0.7) * min(vErr * 0.5, 1.0) * 0.4, 1.0);
+}
+</script>
+
+<script>
+const B = 2048, STEPS_PER_FRAME = 6;
+const LVL = [24, 48, 96, 192, 384];
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false });
+const canFloat = gl && gl.getExtension('EXT_color_buffer_float');
+const canBlend32 = gl && gl.getExtension('EXT_float_blend');
+if (!gl || !canFloat) { document.body.innerHTML = '<p style="color:#fff;font-family:monospace;padding:2em">needs WebGL2 + float render targets</p>'; throw new Error('no webgl2/float'); }
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src.trim());
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vsId, fsId) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, document.getElementById(vsId).textContent));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, document.getElementById(fsId).textContent));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const P = {
+  coord: program('quad-vs', 'coord-fs'),
+  h0:    program('quad-vs', 'h0-fs'),
+  fwd:   program('quad-vs', 'fwd-fs'),
+  d3:    program('quad-vs', 'd3-fs'),
+  back:  program('quad-vs', 'back-fs'),
+  scat:  program('scat-vs', 'scat-fs'),
+  gadam: program('quad-vs', 'gadam-fs'),
+  wadam: program('quad-vs', 'wadam-fs'),
+  ema:   program('quad-vs', 'ema-fs'),
+  disp:  program('quad-vs', 'disp-fs'),
+  stroke: program('stroke-vs', 'stroke-fs'),
+  copy:  program('quad-vs', 'copy-fs'),
+  paint: program('quad-vs', 'paint-fs'),
+  spark: program('spark-vs', 'spark-fs'),
+};
+const U = {};
+for (const [name, prog] of Object.entries(P)) {
+  U[name] = {};
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) {
+    const info = gl.getActiveUniform(prog, i);
+    U[name][info.name.replace('[0]', '')] = gl.getUniformLocation(prog, info.name);
+  }
+}
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+const emptyVao = gl.createVertexArray();
+
+function makeTex(w, h, fmt) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return { tex, fbo, w, h };
+}
+function makeMRT(w, h, fmt0, fmt1) {
+  const t0 = gl.createTexture(), t1 = gl.createTexture();
+  for (const [t, f] of [[t0, fmt0], [t1, fmt1]]) {
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, f, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t0, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, t1, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+  return { tex: t0, mv: t1, fbo, w, h };
+}
+
+// batch state
+const COORD = makeTex(B, 1, gl.RG32F);
+const H0 = makeTex(B, 10, gl.R32F);
+const H1 = makeTex(B, 32, gl.R32F);
+const H2 = makeTex(B, 32, gl.R32F);
+const D3 = makeTex(B, 3,  gl.R32F);
+const D2 = makeTex(B, 32, gl.R32F);
+const D1 = makeTex(B, 32, gl.R32F);
+const D0 = makeTex(B, 10, gl.R32F);
+
+// grids: features (RG) + moments (RGBA), ping-pong; plus grad + EMA
+const gfmt = canBlend32 ? gl.RG32F : gl.RG16F;
+const grids = LVL.map(S => ({
+  S,
+  pair: [makeMRT(S, S, gl.RG32F, gl.RGBA32F), makeMRT(S, S, gl.RG32F, gl.RGBA32F)],
+  cur: 0,
+  grad: makeTex(S, S, gfmt),
+  ema: [makeTex(S, S, gl.RG32F), makeTex(S, S, gl.RG32F)],
+  ecur: 0,
+}));
+
+// MLP: 12→32→32→3 (weights 13/33 columns with bias)
+const W1 = [makeMRT(11, 32, gl.R32F, gl.RG32F), makeMRT(11, 32, gl.R32F, gl.RG32F)];
+const W2 = [makeMRT(33, 32, gl.R32F, gl.RG32F), makeMRT(33, 32, gl.R32F, gl.RG32F)];
+const W3 = [makeMRT(33, 3,  gl.R32F, gl.RG32F), makeMRT(33, 3,  gl.R32F, gl.RG32F)];
+let w1 = 0, w2 = 0, w3 = 0, needInit = true;
+const WE1 = [makeTex(11, 32, gl.R32F), makeTex(11, 32, gl.R32F)];
+const WE2 = [makeTex(33, 32, gl.R32F), makeTex(33, 32, gl.R32F)];
+const WE3 = [makeTex(33, 3,  gl.R32F), makeTex(33, 3,  gl.R32F)];
+let e1 = 0, e2 = 0, e3 = 0, emaInit = true;
+
+// camera
+const camPlaceholder = makeTex(64, 64, gl.RGBA8);
+let video = null, camReady = false, camW = 640, camH = 480, realCamTex = null;
+addEventListener('pointerdown', async () => {
+  if (video) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640 } });
+    video = document.createElement('video');
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    await video.play();
+    document.getElementById('hint')?.remove();
+  } catch (e) { video = null; }
+});
+function uploadCam() {
+  if (!video || video.readyState < 2) return;
+  if (!realCamTex) {
+    camW = video.videoWidth; camH = video.videoHeight;
+    realCamTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, realCamTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+  gl.bindTexture(gl.TEXTURE_2D, realCamTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  camReady = true;
+}
+
+let W = 0, H = 0, RS = null, CV = null, cv = 0;
+function resize() {
+  W = Math.floor(innerWidth);
+  H = Math.floor(innerHeight);
+  canvas.width = W; canvas.height = H;
+  RS = makeTex(Math.max(2, Math.floor(W * 0.5)), Math.max(2, Math.floor(H * 0.5)), gl.RGBA8);
+  gl.bindTexture(gl.TEXTURE_2D, RS.tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  CV = [makeTex(W, H, gl.RGBA16F), makeTex(W, H, gl.RGBA16F)];
+  for (const c of CV) {
+    gl.bindTexture(gl.TEXTURE_2D, c.tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  cv = 0;
+}
+addEventListener('resize', resize);
+resize();
+
+const mouse = { x: 0.5, y: 0.5 };
+addEventListener('pointermove', e => {
+  mouse.x = e.clientX / innerWidth;
+  mouse.y = 1 - e.clientY / innerHeight;
+});
+
+function pass(prog, dst, binds, setu) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+  gl.viewport(0, 0, dst.w, dst.h);
+  gl.useProgram(prog);
+  binds.forEach(([u, tex], i) => {
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(u, i);
+  });
+  if (setu) setu();
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+let simT = 0, stepIdx = 0;
+const DT = 1 / 60;
+const LR_MLP = 0.002, LR_GRID = 0.01;
+const GRID_DECAY = 0.99995;   // the forgetting: ~1 minute half-life
+
+function trainStep() {
+  stepIdx++;
+  const u = U;
+  const g = i => grids[i].pair[grids[i].cur].tex;
+
+  pass(P.coord, COORD, [], () => gl.uniform1f(u.coord.uStep, stepIdx % 4096));
+  pass(P.h0, H0, [[u.h0.uCoord, COORD.tex], [u.h0.uG0, g(0)], [u.h0.uG1, g(1)],
+                  [u.h0.uG2, g(2)], [u.h0.uG3, g(3)], [u.h0.uG4, g(4)]]);
+  pass(P.fwd, H1, [[u.fwd.uW, W1[w1].tex], [u.fwd.uIn, H0.tex]], () => gl.uniform1i(u.fwd.uInN, 10));
+  pass(P.fwd, H2, [[u.fwd.uW, W2[w2].tex], [u.fwd.uIn, H1.tex]], () => gl.uniform1i(u.fwd.uInN, 32));
+  pass(P.d3, D3, [[u.d3.uW3, W3[w3].tex], [u.d3.uH2, H2.tex], [u.d3.uCoord, COORD.tex],
+                  [u.d3.uCam, camReady ? realCamTex : camPlaceholder.tex]], () => {
+    gl.uniform1f(u.d3.uTime, simT);
+    gl.uniform1f(u.d3.uUseCam, camReady ? 1 : 0);
+    gl.uniform1f(u.d3.uAspect, W / H);
+    gl.uniform1f(u.d3.uCamAspect, camW / camH);
+    gl.uniform2f(u.d3.uMouse, mouse.x, mouse.y);
+  });
+  pass(P.back, D2, [[u.back.uWnext, W3[w3].tex], [u.back.uDnext, D3.tex], [u.back.uH, H2.tex]],
+    () => { gl.uniform1i(u.back.uNextN, 3); gl.uniform1f(u.back.uLinear, 0); });
+  pass(P.back, D1, [[u.back.uWnext, W2[w2].tex], [u.back.uDnext, D2.tex], [u.back.uH, H1.tex]],
+    () => { gl.uniform1i(u.back.uNextN, 32); gl.uniform1f(u.back.uLinear, 0); });
+  pass(P.back, D0, [[u.back.uWnext, W1[w1].tex], [u.back.uDnext, D1.tex], [u.back.uH, H0.tex]],
+    () => { gl.uniform1i(u.back.uNextN, 32); gl.uniform1f(u.back.uLinear, 1); });
+
+  // grids: clear grad, scatter batch gradients, Adam + decay
+  for (let l = 0; l < 5; l++) {
+    const G = grids[l];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, G.grad.fbo);
+    gl.viewport(0, 0, G.S, G.S);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(P.scat);
+    gl.bindVertexArray(emptyVao);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, COORD.tex);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, D0.tex);
+    gl.uniform1i(u.scat.uCoord, 0);
+    gl.uniform1i(u.scat.uD0, 1);
+    gl.uniform1f(u.scat.uSize, G.S);
+    gl.uniform1i(u.scat.uLvl, l);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArrays(gl.POINTS, 0, B);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(vao);
+
+    const src = G.pair[G.cur], dst = G.pair[1 - G.cur];
+    pass(P.gadam, dst, [[u.gadam.uG, src.tex], [u.gadam.uMV, src.mv], [u.gadam.uGrad, G.grad.tex]], () => {
+      gl.uniform1f(u.gadam.uLR, LR_GRID);
+      gl.uniform1f(u.gadam.uT, Math.min(stepIdx, 100000));
+      gl.uniform1f(u.gadam.uReset, needInit ? 1 : 0);
+      gl.uniform1f(u.gadam.uDecay, GRID_DECAY);
+      gl.uniform1f(u.gadam.uSeed, 3.1 + l * 2.7);
+    });
+    G.cur = 1 - G.cur;
+  }
+
+  const adam = (Wp, cur, Dtex, Atex, inN, seed, scale) => {
+    pass(P.wadam, Wp[1 - cur], [[u.wadam.uW, Wp[cur].tex], [u.wadam.uMV, Wp[cur].mv],
+                                [u.wadam.uD, Dtex], [u.wadam.uA, Atex]], () => {
+      gl.uniform1i(u.wadam.uInN, inN);
+      gl.uniform1f(u.wadam.uLR, LR_MLP);
+      gl.uniform1f(u.wadam.uReset, needInit ? 1 : 0);
+      gl.uniform1f(u.wadam.uSeed, seed);
+      gl.uniform1f(u.wadam.uScale, scale);
+      gl.uniform1f(u.wadam.uT, Math.min(stepIdx, 100000));
+    });
+  };
+  adam(W3, w3, D3.tex, H2.tex, 32, 13.7, 0.6); w3 = 1 - w3;
+  adam(W2, w2, D2.tex, H1.tex, 32, 7.1, 0.5);  w2 = 1 - w2;
+  adam(W1, w1, D1.tex, H0.tex, 10, 3.9, 0.8);  w1 = 1 - w1;
+  needInit = false;
+}
+
+function step() {
+  simT += DT;
+  for (let s = 0; s < STEPS_PER_FRAME; s++) trainStep();
+  const ema = (dst, cur, srcTex) => {
+    pass(P.ema, dst[1 - cur], [[U.ema.uWE, dst[cur].tex], [U.ema.uW, srcTex]],
+      () => gl.uniform1f(U.ema.uInit, emaInit ? 1 : 0));
+  };
+  ema(WE1, e1, W1[w1].tex); e1 = 1 - e1;
+  ema(WE2, e2, W2[w2].tex); e2 = 1 - e2;
+  ema(WE3, e3, W3[w3].tex); e3 = 1 - e3;
+  for (const G of grids) {
+    ema(G.ema, G.ecur, G.pair[G.cur].tex);
+    G.ecur = 1 - G.ecur;
+  }
+  emaInit = false;
+
+  // the belief, read out for the painter
+  pass(P.disp, RS, [
+    [U.disp.uG0, grids[0].ema[grids[0].ecur].tex], [U.disp.uG1, grids[1].ema[grids[1].ecur].tex],
+    [U.disp.uG2, grids[2].ema[grids[2].ecur].tex], [U.disp.uG3, grids[3].ema[grids[3].ecur].tex],
+    [U.disp.uG4, grids[4].ema[grids[4].ecur].tex],
+    [U.disp.uW1, WE1[e1].tex], [U.disp.uW2, WE2[e2].tex], [U.disp.uW3, WE3[e3].tex],
+  ], () => gl.uniform2f(U.disp.uRes, RS.w, RS.h));
+
+  // carry the painting forward (copy shader — float blits are not
+  // portable), then rework it where it is wrong
+  gl.bindFramebuffer(gl.FRAMEBUFFER, CV[1 - cv].fbo);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(P.copy);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, CV[cv].tex);
+  gl.uniform1i(U.copy.uSrc, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.useProgram(P.stroke);
+  gl.bindVertexArray(emptyVao);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, RS.tex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, CV[cv].tex);
+  gl.uniform1i(U.stroke.uBelief, 0);
+  gl.uniform1i(U.stroke.uPrev, 1);
+  gl.uniform2f(U.stroke.uCRes, W, H);
+  gl.uniform1f(U.stroke.uFrame, stepIdx % 4096);
+  gl.enable(gl.BLEND);
+  // rgb: paint covers paint. alpha: thickness only ever accumulates —
+  // low-alpha churn strokes must never erode the impasto beneath them
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE);
+  gl.drawArrays(gl.POINTS, 0, 896);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(vao);
+  cv = 1 - cv;
+}
+
+function render() {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(P.paint);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, CV[cv].tex);
+  gl.uniform1i(U.paint.uCanvas, 0);
+  gl.uniform2f(U.paint.uRes, W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(P.spark);
+  gl.bindVertexArray(emptyVao);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, COORD.tex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, D3.tex);
+  gl.uniform1i(U.spark.uCoord, 0);
+  gl.uniform1i(U.spark.uD3, 1);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE);
+  gl.drawArrays(gl.POINTS, 0, B);
+  gl.disable(gl.BLEND);
+  gl.bindVertexArray(vao);
+}
+
+// ?warp=N pre-runs N frames before first paint — headless capture
+// can't fast-forward requestAnimationFrame, so the piece does it itself
+const warp = Math.min(20000, parseInt(new URLSearchParams(location.search).get('warp'), 10) || 0);
+for (let i = 0; i < warp; i++) step();
+
+function frame() {
+  uploadCam();
+  step();
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+if (window.self !== window.top) document.getElementById('hint')?.remove();
+else setTimeout(() => { const h = document.getElementById('hint'); if (h) h.style.opacity = 0; }, 14000);
+</script>
+</body>
+</html>

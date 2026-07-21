@@ -24,6 +24,7 @@ it has never been.
 
 | # | piece | techniques | live | notes |
 |---|-------|------------|------|-------|
+| 013 | **impasto** | painterly rendering · error-driven strokes · neural field | [run](https://cjdupre.github.io/tumult/builds/013-impasto/) | [notes](builds/013-impasto/NOTES.md) |
 | 012 | **engram** | neural field · trainable feature grids · live backprop | [run](https://cjdupre.github.io/tumult/builds/012-engram/) | [notes](builds/012-engram/NOTES.md) |
 | 011 | **pupil** | neural network · live backprop · sgd in shaders | [run](https://cjdupre.github.io/tumult/builds/011-pupil/) | [notes](builds/011-pupil/NOTES.md) |
 | 010 | **archive** | data sculpture · projection morphing · real seismic data | [run](https://cjdupre.github.io/tumult/builds/010-archive/) | [notes](builds/010-archive/NOTES.md) |

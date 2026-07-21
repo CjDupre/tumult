@@ -158,7 +158,26 @@
     "title": "engram",
     "date": "2026-07-20",
     "lineage": "011-pupil",
-    "techniques": ["neural field", "trainable feature grids", "live backprop", "instant-ngp"],
-    "blurb": "011's cure: five trainable feature grids give the live-training network real eyesight — coarse thoughts first, fine detail etched in seconds, like a photograph developing. Its memory fades where it stops looking. Click for camera."
+    "techniques": [
+      "neural field",
+      "trainable feature grids",
+      "live backprop",
+      "instant-ngp"
+    ],
+    "blurb": "011's cure: five trainable feature grids give the live-training network real eyesight \u2014 coarse thoughts first, fine detail etched in seconds, like a photograph developing. Its memory fades where it stops looking. Click for camera."
+  },
+  {
+    "id": "013",
+    "slug": "013-impasto",
+    "title": "impasto",
+    "date": "2026-07-20",
+    "lineage": "012-engram",
+    "techniques": [
+      "painterly rendering",
+      "error-driven strokes",
+      "neural field",
+      "impasto lighting"
+    ],
+    "blurb": "012's engram learns the world; a painter with ~900 brushes a frame repaints only what changed. Strokes follow the image's grain, deposit thickness, and catch the light. Click for camera."
   }
 ]
