@@ -179,5 +179,19 @@
       "impasto lighting"
     ],
     "blurb": "012's engram learns the world; a painter with ~900 brushes a frame repaints only what changed. Strokes follow the image's grain, deposit thickness, and catch the light. Click for camera."
+  },
+  {
+    "id": "014",
+    "slug": "014-speedpaint",
+    "title": "speedpaint",
+    "date": "2026-07-20",
+    "lineage": "013-impasto",
+    "techniques": [
+      "brush engine",
+      "painterly rendering",
+      "edge economy",
+      "neural field"
+    ],
+    "blurb": "A digital-painting brush engine speedpaints the live neural field: dragged tapered strokes along the image's contours \u2014 broad soft washes in flat passages, hard accents on edges, nothing stamped twice. Click for camera."
   }
 ]
