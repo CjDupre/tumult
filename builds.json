@@ -193,5 +193,19 @@
       "neural field"
     ],
     "blurb": "A digital-painting brush engine speedpaints the live neural field: dragged tapered strokes along the image's contours \u2014 broad soft washes in flat passages, hard accents on edges, nothing stamped twice. Click for camera."
+  },
+  {
+    "id": "015",
+    "slug": "015-iris",
+    "title": "iris",
+    "date": "2026-07-20",
+    "lineage": "014-speedpaint",
+    "techniques": [
+      "video feedback",
+      "synesthetic color",
+      "brush engine",
+      "chromatic aberration"
+    ],
+    "blurb": "014's painter, dosed: the canvas melts, spirals, and cycles the spectrum while strokes keep repainting what is real. Values become hues; edges vibrate with their complements. Click for camera."
   }
 ]
