@@ -78,9 +78,7 @@
   .live::before {
     content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
     background: var(--acc); margin-right: 6px; vertical-align: 1px;
-    animation: pulse 2s infinite;
   }
-  @keyframes pulse { 50% { opacity: .3; } }
   .card-body { padding: 14px 16px 16px; }
   .card-title { display: flex; justify-content: space-between; align-items: baseline; }
   .card-title .name { font-size: 17px; }
@@ -138,9 +136,13 @@
   }
   builds.sort((a, b) => b.id.localeCompare(a.id)); // newest first
 
+  // cache-buster: iframes ignore hard refreshes, so a stale build could
+  // keep haunting the gallery long after it was fixed
+  const rev = Date.now().toString(36);
+
   // newest build runs live behind the masthead
   const mast = document.createElement('iframe');
-  mast.src = `builds/${builds[0].slug}/index.html`;
+  mast.src = `builds/${builds[0].slug}/index.html?v=${rev}`;
   mast.loading = 'lazy';
   mast.tabIndex = -1;
   document.getElementById('mast-frame').replaceWith(mast);
@@ -154,7 +156,7 @@
     a.className = 'card';
     a.href = `builds/${b.slug}/index.html`;
     a.innerHTML = `
-      <div class="frame" data-src="builds/${b.slug}/index.html">
+      <div class="frame" data-src="builds/${b.slug}/index.html?v=${rev}">
         <span class="live">live</span>
       </div>
       <div class="card-body">
