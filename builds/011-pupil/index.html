@@ -200,7 +200,11 @@ void main() {
   float v = mix(g * g, mv.y, 0.999);
   float mh = m / (1.0 - pow(0.9,   uT));
   float vh = v / (1.0 - pow(0.999, uT));
-  outW = vec4(texelFetch(uW, ivec2(j, i), 0).r - uLR * mh / (sqrt(vh) + 1e-8), 0, 0, 0);
+  // AdamW decay + fat epsilon: without them, hours of training on a
+  // drifting target grow the weights until the belief fragments into
+  // high-frequency shards. Perpetual pieces need perpetual optimizers.
+  float w = (texelFetch(uW, ivec2(j, i), 0).r - uLR * mh / (sqrt(vh) + 1e-6)) * 0.99985;
+  outW = vec4(clamp(w, -3.0, 3.0), 0, 0, 0);
   outMV = vec4(m, v, 0.0, 0.0);
 }
 </script>
