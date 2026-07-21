@@ -130,7 +130,21 @@
     "title": "archive",
     "date": "2026-07-20",
     "lineage": "009-tremor",
-    "techniques": ["data sculpture", "projection morphing", "real seismic data", "gpu particles"],
-    "blurb": "The same 24,451 earthquakes as 009, but now the function changes instead of the data: a million particles morph between globe, time helix, magnitude wall, and storm — each transition sweeping in chronological order."
+    "techniques": [
+      "data sculpture",
+      "projection morphing",
+      "real seismic data",
+      "gpu particles"
+    ],
+    "blurb": "The same 24,451 earthquakes as 009, but now the function changes instead of the data: a million particles morph between globe, time helix, magnitude wall, and storm \u2014 each transition sweeping in chronological order."
+  },
+  {
+    "id": "011",
+    "slug": "011-pupil",
+    "title": "pupil",
+    "date": "2026-07-20",
+    "lineage": "010-archive",
+    "techniques": ["neural network", "live backprop", "sgd in shaders", "webcam"],
+    "blurb": "A 2,339-parameter neural network training by backprop, live, in fragment shaders. The image is its current belief; the sparks are its training samples. Click to make its world your camera."
   }
 ]
