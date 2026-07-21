@@ -144,7 +144,21 @@
     "title": "pupil",
     "date": "2026-07-20",
     "lineage": "010-archive",
-    "techniques": ["neural network", "live backprop", "sgd in shaders", "webcam"],
+    "techniques": [
+      "neural network",
+      "live backprop",
+      "sgd in shaders",
+      "webcam"
+    ],
     "blurb": "A 2,339-parameter neural network training by backprop, live, in fragment shaders. The image is its current belief; the sparks are its training samples. Click to make its world your camera."
+  },
+  {
+    "id": "012",
+    "slug": "012-engram",
+    "title": "engram",
+    "date": "2026-07-20",
+    "lineage": "011-pupil",
+    "techniques": ["neural field", "trainable feature grids", "live backprop", "instant-ngp"],
+    "blurb": "011's cure: five trainable feature grids give the live-training network real eyesight — coarse thoughts first, fine detail etched in seconds, like a photograph developing. Its memory fades where it stops looking. Click for camera."
   }
 ]
