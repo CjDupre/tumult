@@ -116,7 +116,21 @@
     "title": "tremor",
     "date": "2026-07-20",
     "lineage": "008-nodal",
-    "techniques": ["real seismic data", "wave equation on a sphere", "data replay", "emergent cartography"],
-    "blurb": "24,451 real earthquakes, 1975 to yesterday, replayed through a wave equation on the globe. No coastlines are stored — the plate boundaries draw themselves. Drag to orbit."
+    "techniques": [
+      "real seismic data",
+      "wave equation on a sphere",
+      "data replay",
+      "emergent cartography"
+    ],
+    "blurb": "24,451 real earthquakes, 1975 to yesterday, replayed through a wave equation on the globe. No coastlines are stored \u2014 the plate boundaries draw themselves. Drag to orbit."
+  },
+  {
+    "id": "010",
+    "slug": "010-archive",
+    "title": "archive",
+    "date": "2026-07-20",
+    "lineage": "009-tremor",
+    "techniques": ["data sculpture", "projection morphing", "real seismic data", "gpu particles"],
+    "blurb": "The same 24,451 earthquakes as 009, but now the function changes instead of the data: a million particles morph between globe, time helix, magnitude wall, and storm — each transition sweeping in chronological order."
   }
 ]
